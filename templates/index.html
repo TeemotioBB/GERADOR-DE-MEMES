@@ -154,6 +154,16 @@
   .btn-ler:disabled{opacity:.45;cursor:not-allowed;}
   .btn-ler.lendo{color:var(--azul);border-color:var(--azul);background:#eaf6fe;}
 
+  /* ---- Botão baixar item individual ---- */
+  .btn-baixar-item{
+    display:inline-flex;align-items:center;gap:6px;
+    padding:7px 14px;border-radius:999px;font-size:13px;font-weight:700;
+    cursor:pointer;border:1px solid var(--ok);background:#e6f7f0;
+    color:#00875a;text-decoration:none;font-family:inherit;
+    align-self:flex-start;transition:.15s background;
+  }
+  .btn-baixar-item:hover{background:#d3f0e3;}
+
   /* ---- Botão remover ---- */
   .remover{
     position:absolute;top:10px;right:12px;
@@ -235,7 +245,7 @@
       <button class="btn" id="btnLimpar">🗑 Limpar tudo</button>
       <button class="btn azul" id="btnGerar">⚡ Gerar todos</button>
     </div>
-    <a class="download-zip" id="btnZip">⬇ Baixar todos (.zip)</a>
+    <a class="download-zip" id="btnZip">⬇ Baixar todos</a>
   </div>
 
   <footer>
@@ -450,6 +460,16 @@
     });
     conteudo.appendChild(btnLer);
 
+    // Botão de baixar este vídeo (aparece só quando está pronto)
+    if (it.estado === 'ok' && it.jobId){
+      const btnBaixar = document.createElement('a');
+      btnBaixar.className = 'btn-baixar-item';
+      btnBaixar.innerHTML = '⬇ Baixar este';
+      btnBaixar.href = '/baixar/' + it.jobId;
+      btnBaixar.setAttribute('download', '');
+      conteudo.appendChild(btnBaixar);
+    }
+
     corpo.appendChild(conteudo);
     div.appendChild(corpo);
     div.querySelector('.remover').addEventListener('click', () => remover(it.localId));
@@ -556,12 +576,19 @@
       btnZip.classList.add('mostrar');
       btnZip.onclick = async e => {
         e.preventDefault();
-        btnZip.textContent='Preparando .zip...';
-        const resp = await fetch('/zip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids})});
-        if (!resp.ok){ alert('Erro ao montar o zip.'); btnZip.textContent='⬇ Baixar todos (.zip)'; return; }
-        const blob = await resp.blob();
-        const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='posts.zip'; a.click();
-        btnZip.textContent='⬇ Baixar todos (.zip)';
+        btnZip.textContent='Baixando...';
+        // Baixa cada vídeo separadamente, com um pequeno intervalo entre eles
+        // para o navegador não bloquear os downloads em sequência.
+        for (const id of ids){
+          const a=document.createElement('a');
+          a.href='/baixar/'+id;
+          a.download='';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          await new Promise(r => setTimeout(r, 800));
+        }
+        btnZip.textContent='⬇ Baixar todos';
       };
     }
   });
