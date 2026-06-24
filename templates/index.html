@@ -45,6 +45,22 @@
   }
   .token-bar a:hover{background:#eaf6fe;}
 
+  /* ---- Barra de perfil ---- */
+  .perfil-bar{
+    width:100%;max-width:700px;margin-bottom:16px;
+    display:flex;align-items:center;gap:12px;
+    background:var(--branco);border:1px solid var(--borda);
+    border-radius:var(--radius);padding:12px 18px;
+    box-shadow:0 1px 4px rgba(0,0,0,.06);
+  }
+  .perfil-bar label{font-size:14px;font-weight:700;color:var(--tinta);white-space:nowrap;}
+  .perfil-bar select{
+    flex:1;border:1px solid var(--borda);border-radius:10px;padding:9px 12px;
+    font-size:14px;font-family:inherit;color:var(--tinta);background:#fafafa;
+    cursor:pointer;transition:.15s border-color;
+  }
+  .perfil-bar select:focus{outline:none;border-color:var(--azul);background:#fff;}
+
   /* ---- Card principal ---- */
   .card{
     background:var(--branco);width:100%;max-width:700px;
@@ -185,8 +201,16 @@
 
   <header>
     <h1>🎬 Gerador de Posts</h1>
-    <p>@adultosofrido · recorte o vídeo do concorrente e monte no seu template</p>
+    <p id="subHeader">recorte o vídeo do concorrente e monte no seu template</p>
   </header>
+
+  <div class="perfil-bar">
+    <label>📄 Postar como:</label>
+    <select id="seletorPerfil">
+      <option value="adultosofrido">Adulto Sofrido (@adultosofrido)</option>
+      <option value="achadinhosofcs">achadinhosofcs (@achadinhosofcs)</option>
+    </select>
+  </div>
 
   <div class="token-bar">
     <label>🔑 Chave Claude</label>
@@ -233,6 +257,16 @@
 
   let itens = [];
   let proximoId = 1;
+
+  // Atualiza o subtítulo conforme o perfil escolhido
+  const seletorPerfil = document.getElementById('seletorPerfil');
+  const subHeader = document.getElementById('subHeader');
+  function atualizarSub(){
+    const txt = seletorPerfil.options[seletorPerfil.selectedIndex].text;
+    subHeader.textContent = txt + ' · monte o vídeo no seu template';
+  }
+  seletorPerfil.addEventListener('change', atualizarSub);
+  atualizarSub();
 
   dropzone.addEventListener('click', () => inputVideo.click());
   inputVideo.addEventListener('change', e => { adicionar(e.target.files); inputVideo.value=''; });
@@ -499,6 +533,7 @@
     btnZip.classList.remove('mostrar');
     barraGeral.classList.add('mostrar'); resumo.classList.add('mostrar');
 
+    const perfilSel = document.getElementById('seletorPerfil').value;
     let feitos=0, ok=0, falhas=0; const ids=[];
     for (const it of fila){
       it.estado='processando'; render();
@@ -506,7 +541,7 @@
       try {
         const resp = await fetch('/gerar',{
           method:'POST', headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({id:it.jobId, legenda:it.legenda.trim(), crop:it.box})
+          body:JSON.stringify({id:it.jobId, legenda:it.legenda.trim(), crop:it.box, perfil:perfilSel})
         });
         const j = await resp.json();
         if (!resp.ok) throw new Error(j.erro||'erro');
