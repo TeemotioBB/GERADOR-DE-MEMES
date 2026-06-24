@@ -35,8 +35,8 @@ RESULTS = {}
 UPLOADS = {}
 
 
-def _limpar_depois(paths, delay=600):
-    """Apaga arquivos temporarios depois de 10 min."""
+def _limpar_depois(paths, delay=3600):
+    """Apaga arquivos temporarios depois de 1 hora."""
     def job():
         time.sleep(delay)
         for p in paths:
