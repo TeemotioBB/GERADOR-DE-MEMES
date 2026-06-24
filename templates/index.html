@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gerador de Posts — Adulto Sofrido</title>
+<style>
+  :root{
+    --tinta:#0f1419; --cinza:#536471; --borda:#cfd9de;
+    --azul:#1d9bf0; --azul-escuro:#1a8cd8; --fundo:#f0f2f5;
+    --branco:#fff; --erro:#f4212e; --ok:#00ba7c; --espera:#8b98a5; --alerta:#ff7a00;
+    --radius:16px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--fundo);color:var(--tinta);min-height:100vh;
+    display:flex;flex-direction:column;align-items:center;padding:24px 16px 80px;
+  }
+
+  /* ---- Header ---- */
+  header{text-align:center;margin-bottom:20px;}
+  header h1{font-size:22px;font-weight:800;letter-spacing:-.3px;}
+  header p{color:var(--cinza);font-size:13px;margin-top:3px;}
+
+  /* ---- Barra de chave ---- */
+  .token-bar{
+    width:100%;max-width:700px;margin-bottom:16px;
+    display:flex;align-items:center;gap:10px;
+    background:var(--branco);border:1px solid var(--borda);
+    border-radius:var(--radius);padding:12px 18px;
+    box-shadow:0 1px 4px rgba(0,0,0,.06);
+  }
+  .token-bar label{font-size:13px;font-weight:600;color:var(--cinza);white-space:nowrap;}
+  .token-bar input{
+    flex:1;border:1px solid var(--borda);border-radius:10px;padding:7px 12px;
+    font-size:13px;font-family:monospace;color:var(--tinta);background:#fafafa;
+    transition:.15s border-color;
+  }
+  .token-bar input:focus{outline:none;border-color:var(--azul);background:#fff;}
+  .token-bar a{
+    font-size:12px;font-weight:600;color:var(--azul);white-space:nowrap;
+    text-decoration:none;padding:6px 12px;border:1px solid var(--azul);
+    border-radius:999px;transition:.15s background;
+  }
+  .token-bar a:hover{background:#eaf6fe;}
+
+  /* ---- Card principal ---- */
+  .card{
+    background:var(--branco);width:100%;max-width:700px;
+    border:1px solid var(--borda);border-radius:var(--radius);padding:20px;
+    box-shadow:0 1px 4px rgba(0,0,0,.06);
+  }
+
+  /* ---- Dropzone ---- */
+  .dropzone{
+    border:2px dashed var(--borda);border-radius:12px;padding:28px 18px;
+    text-align:center;color:var(--cinza);cursor:pointer;font-size:14px;
+    transition:.15s border-color,.15s background;
+  }
+  .dropzone:hover,.dropzone.ativo{border-color:var(--azul);background:#f0f8ff;}
+  .dropzone strong{color:var(--azul);}
+  .dropzone .sub{font-size:12px;margin-top:4px;display:block;}
+
+  /* ---- Lista de itens ---- */
+  .lista{margin-top:16px;display:flex;flex-direction:column;gap:14px;}
+  .vazio{text-align:center;color:var(--espera);font-size:14px;padding:12px 0 4px;}
+
+  /* ---- Item individual ---- */
+  .item{
+    border:1px solid var(--borda);border-radius:14px;padding:14px;
+    position:relative;background:#fff;transition:.15s box-shadow;
+  }
+  .item:hover{box-shadow:0 2px 8px rgba(0,0,0,.07);}
+  .item-topo{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:8px;}
+  .item-nome{font-size:12px;color:var(--cinza);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;}
+
+  /* ---- Badges ---- */
+  .badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:700;padding:3px 10px;border-radius:999px;white-space:nowrap;}
+  .badge.analisando{background:#eff3f4;color:var(--espera);}
+  .badge.auto{background:#e6f7f0;color:var(--ok);}
+  .badge.conferir{background:#fff1e3;color:var(--alerta);}
+  .badge.processando{background:#e8f5fe;color:var(--azul);}
+  .badge.ok{background:#e6f7f0;color:var(--ok);}
+  .badge.erro{background:#fdeaec;color:var(--erro);}
+
+  /* ---- Corpo do item (preview + controles) ---- */
+  .corpo{display:flex;gap:14px;align-items:flex-start;}
+
+  .recorte-area{
+    position:relative;flex-shrink:0;width:190px;background:#111;
+    border-radius:10px;overflow:hidden;user-select:none;touch-action:none;
+  }
+  .recorte-area img{display:block;width:100%;pointer-events:none;}
+  .recorte-ph{
+    width:190px;height:250px;flex-shrink:0;background:#111;border-radius:10px;
+    display:flex;align-items:center;justify-content:center;
+    color:#555;font-size:13px;
+  }
+
+  .caixa{
+    position:absolute;border:2px solid var(--azul);
+    box-shadow:0 0 0 9999px rgba(0,0,0,.42);
+    cursor:move;box-sizing:border-box;
+  }
+  .alca{
+    position:absolute;width:14px;height:14px;background:var(--azul);
+    border:2px solid #fff;border-radius:50%;
+  }
+  .alca.nw{left:-8px;top:-8px;cursor:nwse-resize;}
+  .alca.ne{right:-8px;top:-8px;cursor:nesw-resize;}
+  .alca.sw{left:-8px;bottom:-8px;cursor:nesw-resize;}
+  .alca.se{right:-8px;bottom:-8px;cursor:nwse-resize;}
+
+  /* ---- Painel direito ---- */
+  .conteudo{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px;}
+  .dica{font-size:12px;color:var(--cinza);line-height:1.4;}
+  .dica.erro-txt{color:var(--erro);}
+
+  textarea{
+    width:100%;min-height:80px;resize:vertical;
+    border:1px solid var(--borda);border-radius:10px;
+    padding:9px 12px;font-size:14px;font-family:inherit;
+    color:var(--tinta);line-height:1.45;background:#fafafa;
+    transition:.15s border-color,.15s background;
+  }
+  textarea:focus{outline:none;border-color:var(--azul);background:#fff;}
+
+  .btn-ler{
+    display:inline-flex;align-items:center;gap:6px;
+    padding:7px 14px;border-radius:999px;font-size:13px;font-weight:600;
+    cursor:pointer;border:1px solid var(--borda);background:#fff;
+    color:var(--cinza);font-family:inherit;
+    transition:.15s background,.15s color,.15s border-color;
+    align-self:flex-start;
+  }
+  .btn-ler:hover{border-color:var(--azul);color:var(--azul);background:#f0f8ff;}
+  .btn-ler:disabled{opacity:.45;cursor:not-allowed;}
+  .btn-ler.lendo{color:var(--azul);border-color:var(--azul);background:#eaf6fe;}
+
+  /* ---- Botão remover ---- */
+  .remover{
+    position:absolute;top:10px;right:12px;
+    width:28px;height:28px;border-radius:50%;
+    border:none;background:#f0f2f5;color:var(--cinza);
+    font-size:18px;line-height:1;cursor:pointer;z-index:5;
+    display:flex;align-items:center;justify-content:center;
+    transition:.15s background,.15s color;
+  }
+  .remover:hover{background:#fdeaec;color:var(--erro);}
+
+  /* ---- Barra de progresso ---- */
+  .barra-geral{margin-top:16px;height:6px;background:#eff3f4;border-radius:999px;overflow:hidden;display:none;}
+  .barra-geral.mostrar{display:block;}
+  .barra-geral .preenche{height:100%;width:0;background:var(--azul);transition:width .3s;}
+  .resumo{margin-top:10px;text-align:center;font-size:13px;color:var(--cinza);display:none;}
+  .resumo.mostrar{display:block;}
+
+  /* ---- Ações ---- */
+  .acoes{display:flex;gap:10px;margin-top:18px;}
+  .btn{
+    flex:1;padding:13px;border-radius:999px;font-size:15px;font-weight:700;
+    cursor:pointer;border:1.5px solid var(--borda);background:#fff;
+    color:var(--tinta);font-family:inherit;transition:.15s background,.15s border-color;
+  }
+  .btn:hover{background:#f7f9f9;}
+  .btn.azul{background:var(--azul);color:#fff;border-color:var(--azul);}
+  .btn.azul:hover{background:var(--azul-escuro);border-color:var(--azul-escuro);}
+  .btn:disabled{opacity:.5;cursor:not-allowed;}
+
+  .download-zip{
+    display:none;margin-top:12px;width:100%;padding:13px;border-radius:999px;
+    background:var(--ok);color:#fff;border:none;font-size:15px;font-weight:700;
+    cursor:pointer;text-align:center;text-decoration:none;
+    transition:.15s background;
+  }
+  .download-zip:hover{background:#00a36b;}
+  .download-zip.mostrar{display:block;}
+
+  /* ---- Footer ---- */
+  footer{margin-top:24px;color:var(--cinza);font-size:12px;text-align:center;max-width:600px;line-height:1.6;}
+</style>
+</head>
+<body>
+
+  <header>
+    <h1>🎬 Gerador de Posts</h1>
+    <p>@adultosofrido · recorte o vídeo do concorrente e monte no seu template</p>
+  </header>
+
+  <div class="token-bar">
+    <label>🔑 Chave Claude</label>
+    <input type="password" id="claudeToken" placeholder="sk-ant-api03-..." autocomplete="off">
+    <a href="https://console.anthropic.com/settings/keys" target="_blank">Obter chave →</a>
+  </div>
+
+  <div class="card">
+    <div class="dropzone" id="dropzone">
+      <div>📁 Arraste os reels aqui ou <strong>clique para escolher</strong></div>
+      <span class="sub">pode adicionar vários de uma vez</span>
+    </div>
+    <input type="file" id="inputVideo" accept="video/*" multiple hidden>
+
+    <div class="lista" id="lista"></div>
+    <div class="vazio" id="vazio">Nenhum reel adicionado ainda.</div>
+
+    <div class="barra-geral" id="barraGeral"><div class="preenche" id="preenche"></div></div>
+    <div class="resumo" id="resumo"></div>
+
+    <div class="acoes">
+      <button class="btn" id="btnLimpar">🗑 Limpar tudo</button>
+      <button class="btn azul" id="btnGerar">⚡ Gerar todos</button>
+    </div>
+    <a class="download-zip" id="btnZip">⬇ Baixar todos (.zip)</a>
+  </div>
+
+  <footer>
+    A caixa azul mostra o recorte detectado automaticamente.<br>
+    Arraste ou puxe os cantos para ajustar. Tudo roda no seu computador.
+  </footer>
+
+<script>
+  const dropzone   = document.getElementById('dropzone');
+  const inputVideo = document.getElementById('inputVideo');
+  const lista      = document.getElementById('lista');
+  const vazio      = document.getElementById('vazio');
+  const btnGerar   = document.getElementById('btnGerar');
+  const btnLimpar  = document.getElementById('btnLimpar');
+  const btnZip     = document.getElementById('btnZip');
+  const barraGeral = document.getElementById('barraGeral');
+  const preenche   = document.getElementById('preenche');
+  const resumo     = document.getElementById('resumo');
+
+  let itens = [];
+  let proximoId = 1;
+
+  dropzone.addEventListener('click', () => inputVideo.click());
+  inputVideo.addEventListener('change', e => { adicionar(e.target.files); inputVideo.value=''; });
+  ['dragover','dragenter'].forEach(ev =>
+    dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.add('ativo'); }));
+  ['dragleave','drop'].forEach(ev =>
+    dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.remove('ativo'); }));
+  dropzone.addEventListener('drop', e => adicionar(e.dataTransfer.files));
+
+  function adicionar(fileList){
+    for (const f of fileList){
+      if (!f.type.startsWith('video/')) continue;
+      const it = {
+        localId: proximoId++, file: f, nome: f.name,
+        estado: 'analisando', jobId: null, legenda: '',
+        vw: 0, vh: 0, frame: null, box: null, conf: 0
+      };
+      itens.push(it);
+      analisar(it);
+    }
+    render();
+  }
+
+  async function analisar(it){
+    const fd = new FormData();
+    fd.append('video', it.file);
+    try {
+      const resp = await fetch('/detectar', { method:'POST', body:fd });
+      const j = await resp.json();
+      if (!resp.ok) throw new Error(j.erro || 'erro');
+      it.jobId = j.id; it.vw = j.largura; it.vh = j.altura;
+      it.frame = j.frame; it.box = j.box; it.conf = j.confianca;
+      it.estado = j.confianca >= 0.6 ? 'auto' : 'conferir';
+      const token = document.getElementById('claudeToken').value.trim();
+      if (token && it.frame) lerLegenda(it);
+    } catch(err){
+      it.estado = 'erro_analise';
+      it.msgErro = err.message;
+    }
+    render();
+  }
+
+  async function lerLegenda(it){
+    const token = document.getElementById('claudeToken').value.trim();
+    if (!token || !it.frame) return;
+    try {
+      const imgEl = new Image();
+      await new Promise(r => { imgEl.onload = r; imgEl.src = it.frame; });
+      const scaleY = imgEl.naturalHeight / it.vh;
+      const faixaH = Math.round(it.box.y * scaleY);
+      if (faixaH < 20) return;
+      const canvas = document.createElement('canvas');
+      canvas.width = imgEl.naturalWidth;
+      canvas.height = faixaH;
+      canvas.getContext('2d').drawImage(imgEl, 0, 0);
+      const b64 = canvas.toDataURL('image/png').split(',')[1];
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': token,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true'
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 512,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: b64 } },
+              { type: 'text', text: 'Essa é a parte de cima de um post de rede social. Extraia APENAS o texto da legenda (não o nome nem o @). Copie exatamente como está, com emojis e quebras de linha. Retorne só o texto, sem explicação.' }
+            ]
+          }]
+        })
+      });
+      const j = await resp.json();
+      if (!resp.ok) return;
+      const texto = j.content[0].text.trim();
+      if (texto){ it.legenda = texto; render(); }
+    } catch(e) { /* silencioso */ }
+  }
+
+  function remover(localId){
+    itens = itens.filter(it => it.localId !== localId);
+    render();
+  }
+
+  function render(){
+    vazio.style.display = itens.length ? 'none' : 'block';
+    lista.innerHTML = '';
+    itens.forEach(it => lista.appendChild(montarItem(it)));
+  }
+
+  function montarItem(it){
+    const div = document.createElement('div');
+    div.className = 'item';
+
+    const badges = {
+      analisando: ['analisando', '⏳ analisando...'],
+      auto:       ['auto',       '✓ recorte automático'],
+      conferir:   ['conferir',   '⚠ confira o recorte'],
+      processando:['processando','⏳ gerando...'],
+      ok:         ['ok',         '✓ pronto'],
+      erro:       ['erro',       '✗ falhou'],
+      erro_analise:['erro',      '✗ erro ao analisar']
+    };
+    const b = badges[it.estado] || badges.analisando;
+
+    div.innerHTML = `
+      <button class="remover" title="Remover">×</button>
+      <div class="item-topo">
+        <span class="item-nome" title="${it.nome}">${it.nome}</span>
+        <span class="badge ${b[0]}">${b[1]}</span>
+      </div>`;
+
+    const corpo = document.createElement('div');
+    corpo.className = 'corpo';
+
+    if (it.frame && it.box){
+      const area = document.createElement('div');
+      area.className = 'recorte-area';
+      const img = document.createElement('img');
+      img.src = it.frame;
+      area.appendChild(img);
+      const caixa = document.createElement('div');
+      caixa.className = 'caixa';
+      ['nw','ne','sw','se'].forEach(p => {
+        const a = document.createElement('div');
+        a.className = 'alca ' + p;
+        a.dataset.canto = p;
+        caixa.appendChild(a);
+      });
+      area.appendChild(caixa);
+      corpo.appendChild(area);
+      img.onload = () => posicionarCaixa(it, area, caixa);
+      if (img.complete) posicionarCaixa(it, area, caixa);
+      ativarArraste(it, area, caixa);
+    } else {
+      const ph = document.createElement('div');
+      ph.className = 'recorte-ph';
+      ph.textContent = it.estado === 'erro_analise' ? '✗ erro' : '⏳';
+      corpo.appendChild(ph);
+    }
+
+    const conteudo = document.createElement('div');
+    conteudo.className = 'conteudo';
+
+    const dica = document.createElement('div');
+    dica.className = 'dica' + ((it.estado==='erro'||it.estado==='erro_analise') ? ' erro-txt' : '');
+    dica.textContent =
+      (it.estado==='erro'||it.estado==='erro_analise') && it.msgErro ? '⚠ ' + it.msgErro :
+      it.estado==='conferir' ? 'Recorte incerto — ajuste a caixa azul se precisar.' :
+      it.estado==='auto'     ? 'Recorte detectado. Ajuste se quiser.' :
+      it.estado==='analisando' ? 'Analisando o vídeo...' :
+      'Ajuste a caixa azul sobre o vídeo.';
+    conteudo.appendChild(dica);
+
+    const ta = document.createElement('textarea');
+    ta.placeholder = 'Legenda deste post...';
+    ta.value = it.legenda;
+    ta.addEventListener('input', e => it.legenda = e.target.value);
+    conteudo.appendChild(ta);
+
+    const btnLer = document.createElement('button');
+    btnLer.className = 'btn-ler';
+    btnLer.innerHTML = '📷 Reler legenda';
+    btnLer.title = 'Usa Claude para ler o texto do frame e preencher a legenda';
+    if (!it.frame) btnLer.disabled = true;
+    btnLer.addEventListener('click', async () => {
+      if (!it.frame) return;
+      const token = document.getElementById('claudeToken').value.trim();
+      if (!token){ alert('Cole sua chave da API Claude no campo no topo da página.'); return; }
+      btnLer.disabled = true;
+      btnLer.classList.add('lendo');
+      btnLer.innerHTML = '⏳ Lendo...';
+      await lerLegenda(it);
+      btnLer.disabled = false;
+      btnLer.classList.remove('lendo');
+      btnLer.innerHTML = '📷 Reler legenda';
+    });
+    conteudo.appendChild(btnLer);
+
+    corpo.appendChild(conteudo);
+    div.appendChild(corpo);
+    div.querySelector('.remover').addEventListener('click', () => remover(it.localId));
+    return div;
+  }
+
+  function posicionarCaixa(it, area, caixa){
+    const escala = area.clientWidth / it.vw;
+    it._escala = escala;
+    caixa.style.left   = (it.box.x * escala) + 'px';
+    caixa.style.top    = (it.box.y * escala) + 'px';
+    caixa.style.width  = (it.box.w * escala) + 'px';
+    caixa.style.height = (it.box.h * escala) + 'px';
+  }
+
+  function ativarArraste(it, area, caixa){
+    let modo=null, canto=null, sx=0, sy=0, ini=null;
+    function px(){ return {
+      x:parseFloat(caixa.style.left), y:parseFloat(caixa.style.top),
+      w:parseFloat(caixa.style.width), h:parseFloat(caixa.style.height)
+    };}
+    function start(e){
+      e.preventDefault();
+      const p = e.touches ? e.touches[0] : e;
+      sx=p.clientX; sy=p.clientY; ini=px();
+      if (e.target.classList.contains('alca')){ modo='resize'; canto=e.target.dataset.canto; }
+      else { modo='move'; }
+      document.addEventListener('mousemove', move);
+      document.addEventListener('touchmove', move, {passive:false});
+      document.addEventListener('mouseup', end);
+      document.addEventListener('touchend', end);
+    }
+    function move(e){
+      if(!modo) return;
+      e.preventDefault();
+      const p = e.touches ? e.touches[0] : e;
+      const dx=p.clientX-sx, dy=p.clientY-sy;
+      const maxW=area.clientWidth, maxH=area.clientHeight;
+      let {x,y,w,h}=ini;
+      if (modo==='move'){
+        x=Math.max(0,Math.min(x+dx,maxW-w));
+        y=Math.max(0,Math.min(y+dy,maxH-h));
+      } else {
+        if(canto.includes('e')) w=Math.min(maxW-x,w+dx);
+        if(canto.includes('s')) h=Math.min(maxH-y,h+dy);
+        if(canto.includes('w')){ const nx=Math.max(0,x+dx); w+=(x-nx); x=nx; }
+        if(canto.includes('n')){ const ny=Math.max(0,y+dy); h+=(y-ny); y=ny; }
+        w=Math.max(24,w); h=Math.max(24,h);
+      }
+      caixa.style.left=x+'px'; caixa.style.top=y+'px';
+      caixa.style.width=w+'px'; caixa.style.height=h+'px';
+      const esc=it._escala;
+      it.box={x:Math.round(x/esc),y:Math.round(y/esc),w:Math.round(w/esc),h:Math.round(h/esc)};
+    }
+    function end(){
+      modo=null;
+      document.removeEventListener('mousemove',move);
+      document.removeEventListener('touchmove',move);
+      document.removeEventListener('mouseup',end);
+      document.removeEventListener('touchend',end);
+    }
+    caixa.addEventListener('mousedown', start);
+    caixa.addEventListener('touchstart', start, {passive:false});
+  }
+
+  btnLimpar.addEventListener('click', () => {
+    itens=[]; render();
+    btnZip.classList.remove('mostrar');
+    barraGeral.classList.remove('mostrar');
+    resumo.classList.remove('mostrar');
+  });
+
+  btnGerar.addEventListener('click', async () => {
+    const prontos = itens.filter(it => it.jobId && ['auto','conferir','ok','erro'].includes(it.estado));
+    if (!prontos.length){ alert('Aguarde a análise dos vídeos ou adicione algum.'); return; }
+    const semLegenda = prontos.filter(it => !it.legenda.trim());
+    if (semLegenda.length && !confirm(`${semLegenda.length} vídeo(s) sem legenda serão pulados. Continuar?`)) return;
+
+    const fila = prontos.filter(it => it.legenda.trim());
+    btnGerar.disabled=true; btnLimpar.disabled=true;
+    btnZip.classList.remove('mostrar');
+    barraGeral.classList.add('mostrar'); resumo.classList.add('mostrar');
+
+    let feitos=0, ok=0, falhas=0; const ids=[];
+    for (const it of fila){
+      it.estado='processando'; render();
+      resumo.textContent=`Gerando ${feitos+1} de ${fila.length}...`;
+      try {
+        const resp = await fetch('/gerar',{
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({id:it.jobId, legenda:it.legenda.trim(), crop:it.box})
+        });
+        const j = await resp.json();
+        if (!resp.ok) throw new Error(j.erro||'erro');
+        it.estado='ok'; ok++; ids.push(it.jobId);
+      } catch(err){ it.estado='erro'; it.msgErro=err.message; falhas++; }
+      feitos++; preenche.style.width=(feitos/fila.length*100)+'%'; render();
+    }
+    resumo.textContent=`Concluído: ${ok} pronto(s)`+(falhas?`, ${falhas} falhou(aram)`:'.')+'.';
+    btnGerar.disabled=false; btnLimpar.disabled=false;
+
+    if (ids.length){
+      btnZip.classList.add('mostrar');
+      btnZip.onclick = async e => {
+        e.preventDefault();
+        btnZip.textContent='Preparando .zip...';
+        const resp = await fetch('/zip',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids})});
+        if (!resp.ok){ alert('Erro ao montar o zip.'); btnZip.textContent='⬇ Baixar todos (.zip)'; return; }
+        const blob = await resp.blob();
+        const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='posts.zip'; a.click();
+        btnZip.textContent='⬇ Baixar todos (.zip)';
+      };
+    }
+  });
+</script>
+</body>
+</html>
