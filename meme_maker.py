@@ -155,6 +155,18 @@ def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
     # ---- Avatar ----
     if os.path.exists(AVATAR_PATH):
         av = Image.open(AVATAR_PATH).convert("RGBA").resize((AVATAR_SIZE, AVATAR_SIZE), Image.LANCZOS)
+        # Recorta em circulo automaticamente (funciona com qualquer foto quadrada).
+        # Usa supersampling (4x) para a borda do circulo ficar lisa, sem serrilhado.
+        escala = 4
+        mascara_g = Image.new("L", (AVATAR_SIZE * escala, AVATAR_SIZE * escala), 0)
+        ImageDraw.Draw(mascara_g).ellipse(
+            (0, 0, AVATAR_SIZE * escala, AVATAR_SIZE * escala), fill=255
+        )
+        mascara = mascara_g.resize((AVATAR_SIZE, AVATAR_SIZE), Image.LANCZOS)
+        # combina a transparencia que a foto ja tenha com a mascara circular
+        alpha_atual = av.split()[3]
+        nova_alpha = ImageChops.multiply(alpha_atual, mascara)
+        av.putalpha(nova_alpha)
         img.paste(av, (MARGIN_X, header_y), av)
 
     # ---- Nome + handle ----
