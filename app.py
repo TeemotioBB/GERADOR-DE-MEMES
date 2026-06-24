@@ -120,6 +120,7 @@ def gerar():
     job_id = dados.get("id")
     legenda = (dados.get("legenda") or "").strip()
     crop = dados.get("crop")
+    perfil = dados.get("perfil")  # qual pagina (adultosofrido / achadinhosofcs)
 
     item = UPLOADS.get(job_id)
     if not item or not os.path.exists(item["path"]):
@@ -133,9 +134,9 @@ def gerar():
     try:
         if crop and all(k in crop for k in ("x", "y", "w", "h")):
             regiao = (crop["x"], crop["y"], crop["w"], crop["h"])
-            meme_maker.make_post_from_crop(entrada, legenda, saida, regiao)
+            meme_maker.make_post_from_crop(entrada, legenda, saida, regiao, perfil=perfil)
         else:
-            meme_maker.make_post(entrada, legenda, saida)
+            meme_maker.make_post(entrada, legenda, saida, perfil=perfil)
     except Exception as e:
         return jsonify({"erro": f"Falha ao gerar: {e}"}), 500
 
