@@ -17,11 +17,39 @@ CANVAS_W = 1080          # largura final (9:16)
 CANVAS_H = 1920          # altura final
 BG_COLOR = (255, 255, 255)
 
-PROFILE_NAME = "Adulto Sofrido"
-PROFILE_HANDLE = "@adultosofrido"
+_BASE = os.path.dirname(os.path.abspath(__file__))
 
-# Caminho do avatar (foto de perfil circular, gerada do print original)
-AVATAR_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "avatar.png")
+# ----------------- PERFIS DISPONIVEIS -----------------
+# Cada perfil tem nome, @ e o arquivo de avatar (foto de perfil).
+# Para adicionar mais paginas no futuro, e so copiar um bloco aqui.
+PERFIS = {
+    "adultosofrido": {
+        "nome": "Adulto Sofrido",
+        "handle": "@adultosofrido",
+        "avatar": os.path.join(_BASE, "avatar.png"),
+    },
+    "achadinhosofcs": {
+        "nome": "achadinhosofcs",
+        "handle": "@achadinhosofcs",
+        "avatar": os.path.join(_BASE, "avatar2.png"),
+    },
+}
+PERFIL_PADRAO = "adultosofrido"
+
+# Valores ativos (preenchidos por set_perfil). Comecam no padrao.
+PROFILE_NAME = PERFIS[PERFIL_PADRAO]["nome"]
+PROFILE_HANDLE = PERFIS[PERFIL_PADRAO]["handle"]
+AVATAR_PATH = PERFIS[PERFIL_PADRAO]["avatar"]
+
+
+def set_perfil(chave):
+    """Troca o perfil ativo (nome, @ e avatar) pelo de chave dada.
+    Se a chave nao existir, mantem o padrao."""
+    global PROFILE_NAME, PROFILE_HANDLE, AVATAR_PATH
+    p = PERFIS.get(chave) or PERFIS[PERFIL_PADRAO]
+    PROFILE_NAME = p["nome"]
+    PROFILE_HANDLE = p["handle"]
+    AVATAR_PATH = p["avatar"]
 
 # Fontes (Liberation Sans = identica a Arial/Helvetica, parecida com a do X)
 def _achar_fonte(*nomes):
@@ -190,13 +218,17 @@ def wrap_text(text, font, max_w, draw):
     return linhas_finais
 
 
-def make_post(video_path, caption, output_path):
+def make_post(video_path, caption, output_path, perfil=None):
+    if perfil:
+        set_perfil(perfil)
     return _gerar(video_path, caption, output_path, crop=None)
 
 
-def make_post_from_crop(video_path, caption, output_path, crop):
+def make_post_from_crop(video_path, caption, output_path, crop, perfil=None):
     """crop = (x, y, w, h) em pixels do video de entrada: recorta essa regiao
     (mantendo audio) e monta no template."""
+    if perfil:
+        set_perfil(perfil)
     return _gerar(video_path, caption, output_path, crop=crop)
 
 
