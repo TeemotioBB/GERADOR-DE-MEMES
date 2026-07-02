@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Servidor web local do Gerador de Memes (Adulto Sofrido).
-Abra no navegador, arraste o video, digite a legenda e baixe o post pronto.
 """
 
 import os
@@ -22,21 +21,14 @@ import base64
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 
-# Pasta temporaria para os arquivos processados
 WORK_DIR = os.path.join(tempfile.gettempdir(), "gerador_memes")
 os.makedirs(WORK_DIR, exist_ok=True)
 
-# Guarda o caminho dos resultados por id, para o download
-# RESULTS[id] = {"path": ..., "nome": ...}
 RESULTS = {}
-
-# Guarda os videos enviados na etapa de deteccao, por id
-# UPLOADS[id] = {"path": ..., "nome": ...}
 UPLOADS = {}
 
 
 def _limpar_depois(paths, delay=3600):
-    """Apaga arquivos temporarios depois de 1 hora."""
     def job():
         time.sleep(delay)
         for p in paths:
@@ -54,11 +46,6 @@ def index():
 
 @app.route("/detectar", methods=["POST"])
 def detectar():
-    """Recebe um video, extrai um quadro do meio, detecta o card e devolve:
-    - imagem do quadro (base64) para exibir
-    - dimensoes do video
-    - caixa sugerida (x,y,w,h) e confianca
-    O recorte/ajuste acontece no navegador sobre essa imagem."""
     if "video" not in request.files:
         return jsonify({"erro": "Nenhum video enviado."}), 400
     video = request.files["video"]
@@ -74,18 +61,20 @@ def detectar():
         vw, vh = meme_maker.get_video_size(entrada)
         dur = meme_maker.get_duration(entrada)
         frame_path = os.path.join(WORK_DIR, f"{job_id}_frame.png")
-        # extrai um quadro do meio do video
+        
         meme_maker.run([
             "ffmpeg", "-y", "-ss", f"{dur/2:.2f}", "-i", entrada,
             "-frames:v", "1", "-update", "1", frame_path
         ])
+        
         img = cv2.imread(frame_path)
         box = detector.detectar_card(img)
         conf = detector.confianca(img, box)
+        
         if box is None:
-            # fallback: caixa central padrao
             box = (int(vw * 0.08), int(vh * 0.30), int(vw * 0.84), int(vw * 0.84))
             conf = 0.0
+            
         with open(frame_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
         os.remove(frame_path)
@@ -96,7 +85,6 @@ def detectar():
             pass
         return jsonify({"erro": f"Falha ao analisar: {e}"}), 500
 
-    # guarda o caminho de entrada para o /gerar usar depois
     UPLOADS[job_id] = {"path": entrada, "nome": nome_seguro}
     _limpar_depois([entrada])
 
@@ -111,16 +99,24 @@ def detectar():
 
 @app.route("/gerar", methods=["POST"])
 def gerar():
-    """Gera o post. Espera JSON com:
-    - id: do video ja enviado em /detectar
-    - legenda
-    - crop: {x,y,w,h} opcional (regiao recortada do video original)
-    """
     dados = request.json if request.is_json else {}
     job_id = dados.get("id")
     legenda = (dados.get("legenda") or "").strip()
     crop = dados.get("crop")
-    perfil = dados.get("perfil")  # qual pagina (adultosofrido / achadinhosofcs)
+    perfil = dados.get("perfil")
+
+    # === NOVAS OPÇÕES DE ANTI-DETECÇÃO ===
+    uniqueness = dados.get("uniqueness", {})
+    # Configuração padrão focada em qualidade
+    if not uniqueness:
+        uniqueness = {
+            "light_crop": True,
+            "color_adjust": True,
+            "subtle_grain": True,
+            "speed_factor": 1.01,
+            "fade": True,
+            "crf": 20
+        }
 
     item = UPLOADS.get(job_id)
     if not item or not os.path.exists(item["path"]):
@@ -134,9 +130,9 @@ def gerar():
     try:
         if crop and all(k in crop for k in ("x", "y", "w", "h")):
             regiao = (crop["x"], crop["y"], crop["w"], crop["h"])
-            meme_maker.make_post_from_crop(entrada, legenda, saida, regiao, perfil=perfil)
+            meme_maker.make_post_from_crop(entrada, legenda, saida, regiao, perfil=perfil, uniqueness=uniqueness)
         else:
-            meme_maker.make_post(entrada, legenda, saida, perfil=perfil)
+            meme_maker.make_post(entrada, legenda, saida, perfil=perfil, uniqueness=uniqueness)
     except Exception as e:
         return jsonify({"erro": f"Falha ao gerar: {e}"}), 500
 
@@ -149,7 +145,6 @@ def gerar():
 
 @app.route("/zip", methods=["POST"])
 def baixar_zip():
-    """Recebe uma lista de ids e devolve um zip com todos os posts."""
     ids = request.json.get("ids", []) if request.is_json else []
     if not ids:
         return "Nenhum item para baixar.", 400
@@ -162,7 +157,6 @@ def baixar_zip():
             if not item or not os.path.exists(item["path"]):
                 continue
             nome = item["nome"]
-            # evita nomes repetidos dentro do zip
             n = nome
             i = 2
             while n in usados:
@@ -197,8 +191,6 @@ def preview(job_id):
 
 
 if __name__ == "__main__":
-    # Na nuvem (Railway), a porta vem da variavel de ambiente PORT e o host
-    # precisa ser 0.0.0.0 para aceitar conexoes externas. Localmente, usa 5000.
     porta = int(os.environ.get("PORT", 5000))
     na_nuvem = "PORT" in os.environ
     host = "0.0.0.0" if na_nuvem else "127.0.0.1"
