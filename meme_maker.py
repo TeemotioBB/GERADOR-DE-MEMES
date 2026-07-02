@@ -115,27 +115,27 @@ def apply_uniqueness_filters(input_path, output_path, options=None):
     filters = []
     audio_filters = []
 
+    # 1. Crop leve
     if options.get("light_crop", True):
         filters.append("crop=iw-4:ih-4")
 
+    # 2. Ajuste sutil de cor
     if options.get("color_adjust", True):
         filters.append("eq=brightness=0.012:saturation=1.018:contrast=1.008")
 
+    # 3. Ruído sutil
     if options.get("subtle_grain", True):
         filters.append("noise=alls=4:allf=t")
 
+    # 4. Micro speed
     speed = options.get("speed_factor", 1.01)
     if abs(speed - 1.0) > 0.001:
         filters.append(f"setpts={1/speed}*PTS")
         audio_filters.append(f"atempo={speed}")
 
-    # === FADE MAIS SUAVE E RÁPIDO ===
-    if options.get("fade", True):
-        dur = get_duration(input_path)
-        fade_dur = 0.15          # reduzido de 0.3 para 0.15
-        fade_out_start = max(0, dur - fade_dur)
-        filters.append(f"fade=t=in:st=0:d={fade_dur},fade=t=out:st={fade_out_start:.3f}:d={fade_dur}")
+    # Fade removido completamente
 
+    # Re-encode alta qualidade
     crf = options.get("crf", 20)
     preset = options.get("preset", "slow")
 
@@ -143,6 +143,7 @@ def apply_uniqueness_filters(input_path, output_path, options=None):
 
     if filters:
         cmd += ["-vf", ",".join(filters)]
+
     if audio_filters:
         cmd += ["-af", ",".join(audio_filters)]
 
