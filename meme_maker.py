@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Gerador de posts estilo tweet para a pagina de meme.
-Recebe um video + legenda e devolve o video montado no template (fundo branco 9:16).
 """
 
 import os
@@ -12,11 +11,11 @@ import tempfile
 from PIL import Image, ImageDraw, ImageFont, ImageChops
 
 # ----------------- CONFIGURACOES FIXAS DO TEMPLATE -----------------
-CANVAS_W = 1080          
-CANVAS_H = 1920          
+CANVAS_W = 1080
+CANVAS_H = 1920
 BG_COLOR = (255, 255, 255)
 
-BASE = os.path.dirname(os.path.abspath(file_))
+_BASE = os.path.dirname(os.path.abspath(__file__))
 
 # ----------------- PERFIS DISPONIVEIS -----------------
 PERFIS = {
@@ -48,12 +47,12 @@ def set_perfil(chave):
 
 def _achar_fonte(*nomes):
     pastas = [
-        os.path.join(os.path.dirname(os.path.abspath(_file_)), "fontes"),
+        os.path.join(_BASE, "fontes"),
         "/usr/share/fonts/truetype/liberation",
         "/usr/share/fonts/truetype/dejavu",
         os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts"),
         "/Library/Fonts", "/System/Library/Fonts", "/System/Library/Fonts/Supplemental",
-        os.path.dirname(os.path.abspath(_file_)),
+        _BASE,
     ]
     for nome in nomes:
         if os.path.isabs(nome) and os.path.exists(nome):
@@ -110,34 +109,26 @@ def get_duration(path):
 
 # ====================== ANTI-DETECÇÃO (QUALIDADE VISUAL) ======================
 def apply_uniqueness_filters(input_path, output_path, options=None):
-    """
-    Versão focada em QUALIDADE VISUAL - alterações quase imperceptíveis
-    """
     if options is None:
         options = {}
 
     filters = []
     audio_filters = []
 
-    # 1. Crop muito leve
     if options.get("light_crop", True):
         filters.append("crop=iw-4:ih-4")
 
-    # 2. Ajuste de cor extremamente sutil
     if options.get("color_adjust", True):
         filters.append("eq=brightness=0.012:saturation=1.018:contrast=1.008")
 
-    # 3. Ruído de filme bem leve
     if options.get("subtle_grain", True):
         filters.append("noise=alls=4:allf=t")
 
-    # 4. Micro speed (muito leve)
     speed = options.get("speed_factor", 1.01)
     if abs(speed - 1.0) > 0.001:
         filters.append(f"setpts={1/speed}*PTS")
         audio_filters.append(f"atempo={speed}")
 
-    # 5. Fade in/out suave (corrigido)
     if options.get("fade", True):
         dur = get_duration(input_path)
         fade_dur = 0.3
@@ -145,7 +136,6 @@ def apply_uniqueness_filters(input_path, output_path, options=None):
         filters.append(f"fade=t=in:st=0:d={fade_dur}")
         filters.append(f"fade=t=out:st={fade_out_start:.3f}:d={fade_dur}")
 
-    # Re-encode de alta qualidade
     crf = options.get("crf", 20)
     preset = options.get("preset", "slow")
 
@@ -153,7 +143,6 @@ def apply_uniqueness_filters(input_path, output_path, options=None):
 
     if filters:
         cmd += ["-vf", ",".join(filters)]
-
     if audio_filters:
         cmd += ["-af", ",".join(audio_filters)]
 
@@ -172,12 +161,11 @@ def apply_uniqueness_filters(input_path, output_path, options=None):
         cmd += ["-an"]
 
     cmd.append(output_path)
-
     run(cmd)
     return output_path
 
 
-# ====================== BUILD OVERLAY ======================
+# ====================== RESTO DO CÓDIGO (mantido limpo) ======================
 def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG_COLOR + (255,))
     draw = ImageDraw.Draw(img)
@@ -245,7 +233,6 @@ def wrap_text(text, font, max_w, draw):
     return linhas_finais
 
 
-# ====================== FUNÇÕES PRINCIPAIS ======================
 def make_post(video_path, caption, output_path, perfil=None, uniqueness=None):
     if perfil:
         set_perfil(perfil)
@@ -313,7 +300,6 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
         overlay_path = os.path.join(td, "overlay.png")
         overlay.save(overlay_path)
 
-        # === APLICA ANTI-DETECÇÃO ===
         source_video = video_path
         if uniqueness:
             temp_video = os.path.join(td, "uniquified.mp4")
@@ -355,7 +341,7 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
     return output_path
 
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     if len(sys.argv) < 4:
         print("Uso: python3 meme_maker.py <video> <legenda> <saida.mp4>")
         sys.exit(1)
