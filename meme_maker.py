@@ -129,12 +129,12 @@ def apply_uniqueness_filters(input_path, output_path, options=None):
         filters.append(f"setpts={1/speed}*PTS")
         audio_filters.append(f"atempo={speed}")
 
+    # === FADE MAIS SUAVE E RÁPIDO ===
     if options.get("fade", True):
         dur = get_duration(input_path)
-        fade_dur = 0.3
+        fade_dur = 0.15          # reduzido de 0.3 para 0.15
         fade_out_start = max(0, dur - fade_dur)
-        filters.append(f"fade=t=in:st=0:d={fade_dur}")
-        filters.append(f"fade=t=out:st={fade_out_start:.3f}:d={fade_dur}")
+        filters.append(f"fade=t=in:st=0:d={fade_dur},fade=t=out:st={fade_out_start:.3f}:d={fade_dur}")
 
     crf = options.get("crf", 20)
     preset = options.get("preset", "slow")
