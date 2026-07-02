@@ -13,15 +13,13 @@ import textwrap
 from PIL import Image, ImageDraw, ImageFont, ImageChops
 
 # ----------------- CONFIGURACOES FIXAS DO TEMPLATE -----------------
-CANVAS_W = 1080          # largura final (9:16)
-CANVAS_H = 1920          # altura final
+CANVAS_W = 1080          
+CANVAS_H = 1920          
 BG_COLOR = (255, 255, 255)
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 
 # ----------------- PERFIS DISPONIVEIS -----------------
-# Cada perfil tem nome, @ e o arquivo de avatar (foto de perfil).
-# Para adicionar mais paginas no futuro, e so copiar um bloco aqui.
 PERFIS = {
     "adultosofrido": {
         "nome": "Adulto Sofrido",
@@ -36,36 +34,29 @@ PERFIS = {
 }
 PERFIL_PADRAO = "adultosofrido"
 
-# Valores ativos (preenchidos por set_perfil). Comecam no padrao.
 PROFILE_NAME = PERFIS[PERFIL_PADRAO]["nome"]
 PROFILE_HANDLE = PERFIS[PERFIL_PADRAO]["handle"]
 AVATAR_PATH = PERFIS[PERFIL_PADRAO]["avatar"]
 
 
 def set_perfil(chave):
-    """Troca o perfil ativo (nome, @ e avatar) pelo de chave dada.
-    Se a chave nao existir, mantem o padrao."""
     global PROFILE_NAME, PROFILE_HANDLE, AVATAR_PATH
     p = PERFIS.get(chave) or PERFIS[PERFIL_PADRAO]
     PROFILE_NAME = p["nome"]
     PROFILE_HANDLE = p["handle"]
     AVATAR_PATH = p["avatar"]
 
-# Fontes (Liberation Sans = identica a Arial/Helvetica, parecida com a do X)
+
 def _achar_fonte(*nomes):
-    """Procura um arquivo de fonte em varios locais (Linux, Windows, Mac).
-    Recebe nomes de arquivo candidatos e retorna o primeiro caminho que existir.
-    Se nada for encontrado, retorna None (Pillow usa a fonte padrao)."""
     pastas = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "fontes"),  # empacotada (prioridade)
-        "/usr/share/fonts/truetype/liberation",          # Linux
-        "/usr/share/fonts/truetype/dejavu",              # Linux (alternativa)
-        os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts"),  # Windows
-        "/Library/Fonts", "/System/Library/Fonts", "/System/Library/Fonts/Supplemental",  # Mac
-        os.path.dirname(os.path.abspath(__file__)),      # junto do script
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "fontes"),
+        "/usr/share/fonts/truetype/liberation",
+        "/usr/share/fonts/truetype/dejavu",
+        os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts"),
+        "/Library/Fonts", "/System/Library/Fonts", "/System/Library/Fonts/Supplemental",
+        os.path.dirname(os.path.abspath(__file__)),
     ]
     for nome in nomes:
-        # caminho absoluto direto
         if os.path.isabs(nome) and os.path.exists(nome):
             return nome
         for pasta in pastas:
@@ -75,35 +66,24 @@ def _achar_fonte(*nomes):
     return None
 
 
-# Fontes: tenta Liberation Sans (Linux), depois Arial (Windows), depois
-# DejaVu/Helvetica como ultimo recurso. Todas sao sans-serif parecidas com a do X.
-FONT_BOLD = _achar_fonte(
-    "LiberationSans-Bold.ttf", "arialbd.ttf", "Arial Bold.ttf",
-    "DejaVuSans-Bold.ttf", "Helvetica.ttc"
-)
-FONT_REG = _achar_fonte(
-    "LiberationSans-Regular.ttf", "arial.ttf", "Arial.ttf",
-    "DejaVuSans.ttf", "Helvetica.ttc"
-)
+FONT_BOLD = _achar_fonte("LiberationSans-Bold.ttf", "arialbd.ttf", "Arial Bold.ttf", "DejaVuSans-Bold.ttf")
+FONT_REG = _achar_fonte("LiberationSans-Regular.ttf", "arial.ttf", "Arial.ttf", "DejaVuSans.ttf")
 
 
 def _font(caminho, tamanho):
-    """Carrega a fonte; se o caminho for None, usa a fonte padrao do Pillow."""
     if caminho:
         return ImageFont.truetype(caminho, tamanho)
     return ImageFont.load_default()
 
-# Cores de texto
-COLOR_NAME = (15, 20, 25)        # nome (preto X)
-COLOR_HANDLE = (83, 100, 113)    # @handle (cinza X)
-COLOR_CAPTION = (15, 20, 25)     # legenda
 
-# Layout (coordenadas no canvas 1080x1920)
+COLOR_NAME = (15, 20, 25)
+COLOR_HANDLE = (83, 100, 113)
+COLOR_CAPTION = (15, 20, 25)
+
 MARGIN_X = 90
-HEADER_Y = 560           # topo do cabecalho (avatar/nome)
+HEADER_Y = 560
 AVATAR_SIZE = 110
-CARD_RADIUS = 28         # raio dos cantos arredondados do video
-# -------------------------------------------------------------------
+CARD_RADIUS = 28
 
 
 def run(cmd):
@@ -114,37 +94,88 @@ def run(cmd):
 
 
 def get_video_size(path):
-    res = run([
-        "ffprobe", "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=width,height", "-of", "json", path
-    ])
+    res = run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", path])
     info = json.loads(res.stdout)["streams"][0]
     return int(info["width"]), int(info["height"])
 
 
 def has_audio(path):
-    res = run([
-        "ffprobe", "-v", "error", "-select_streams", "a",
-        "-show_entries", "stream=index", "-of", "json", path
-    ])
+    res = run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "json", path])
     return len(json.loads(res.stdout).get("streams", [])) > 0
 
 
 def get_duration(path):
-    res = run([
-        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-        "-of", "json", path
-    ])
+    res = run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", path])
     return float(json.loads(res.stdout)["format"]["duration"])
 
 
+# ====================== NOVA FUNÇÃO ANTI-DETECÇÃO ======================
+def apply_uniqueness_filters(input_path, output_path, options=None):
+    """
+    Versão focada em QUALIDADE VISUAL - alterações quase imperceptíveis
+    """
+    if options is None:
+        options = {}
+
+    filters = []
+    audio_filters = []
+
+    # 1. Crop muito leve
+    if options.get("light_crop", True):
+        filters.append("crop=iw-4:ih-4")
+
+    # 2. Ajuste de cor extremamente sutil
+    if options.get("color_adjust", True):
+        filters.append("eq=brightness=0.012:saturation=1.018:contrast=1.008")
+
+    # 3. Ruído de filme bem leve
+    if options.get("subtle_grain", True):
+        filters.append("noise=alls=4:allf=t")
+
+    # 4. Micro speed (muito leve)
+    speed = options.get("speed_factor", 1.01)
+    if abs(speed - 1.0) > 0.001:
+        filters.append(f"setpts={1/speed}*PTS")
+        audio_filters.append(f"atempo={speed}")
+
+    # 5. Fade in/out suave
+    if options.get("fade", True):
+        filters.append("fade=t=in:st=0:d=0.3,fade=t=out:st=duration-0.3:d=0.3")
+
+    # Re-encode de alta qualidade
+    crf = options.get("crf", 20)
+    preset = options.get("preset", "slow")
+
+    cmd = ["ffmpeg", "-y", "-i", input_path]
+
+    if filters:
+        cmd += ["-vf", ",".join(filters)]
+
+    if audio_filters:
+        cmd += ["-af", ",".join(audio_filters)]
+
+    cmd += [
+        "-c:v", "libx264",
+        "-crf", str(crf),
+        "-preset", preset,
+        "-pix_fmt", "yuv420p",
+        "-map_metadata", "-1",
+        "-movflags", "+faststart"
+    ]
+
+    if has_audio(input_path):
+        cmd += ["-c:a", "aac", "-b:a", "192k"]
+    else:
+        cmd += ["-an"]
+
+    cmd.append(output_path)
+
+    run(cmd)
+    return output_path
+
+
+# ====================== FUNÇÕES EXISTENTES ======================
 def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
-    """
-    Monta a imagem PNG transparente com tudo EXCETO o video:
-    fundo branco, avatar, nome, handle, legenda, e a moldura do card.
-    O video sera colocado por baixo (no buraco do card) pelo FFmpeg.
-    header_y = topo do cabecalho (calculado para centralizar o bloco).
-    """
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG_COLOR + (255,))
     draw = ImageDraw.Draw(img)
 
@@ -152,29 +183,22 @@ def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
     f_handle = _font(FONT_REG, 36)
     f_caption = _font(FONT_REG, 44)
 
-    # ---- Avatar ----
+    # Avatar, nome, handle, legenda... (mantido igual)
     if os.path.exists(AVATAR_PATH):
         av = Image.open(AVATAR_PATH).convert("RGBA").resize((AVATAR_SIZE, AVATAR_SIZE), Image.LANCZOS)
-        # Recorta em circulo automaticamente (funciona com qualquer foto quadrada).
-        # Usa supersampling (4x) para a borda do circulo ficar lisa, sem serrilhado.
         escala = 4
         mascara_g = Image.new("L", (AVATAR_SIZE * escala, AVATAR_SIZE * escala), 0)
-        ImageDraw.Draw(mascara_g).ellipse(
-            (0, 0, AVATAR_SIZE * escala, AVATAR_SIZE * escala), fill=255
-        )
+        ImageDraw.Draw(mascara_g).ellipse((0, 0, AVATAR_SIZE * escala, AVATAR_SIZE * escala), fill=255)
         mascara = mascara_g.resize((AVATAR_SIZE, AVATAR_SIZE), Image.LANCZOS)
-        # combina a transparencia que a foto ja tenha com a mascara circular
         alpha_atual = av.split()[3]
         nova_alpha = ImageChops.multiply(alpha_atual, mascara)
         av.putalpha(nova_alpha)
         img.paste(av, (MARGIN_X, header_y), av)
 
-    # ---- Nome + handle ----
     text_x = MARGIN_X + AVATAR_SIZE + 28
     draw.text((text_x, header_y + 12), PROFILE_NAME, font=f_name, fill=COLOR_NAME)
     draw.text((text_x, header_y + 62), PROFILE_HANDLE, font=f_handle, fill=COLOR_HANDLE)
 
-    # ---- Legenda (respeita as quebras de linha do usuario) ----
     caption_y = header_y + AVATAR_SIZE + 50
     max_w = CANVAS_W - 2 * MARGIN_X
     lines = wrap_text(caption, f_caption, max_w, draw)
@@ -182,19 +206,15 @@ def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
     for i, line in enumerate(lines):
         draw.text((MARGIN_X, caption_y + i * line_h), line, font=f_caption, fill=COLOR_CAPTION)
 
-    # ---- Moldura do card do video (buraco transparente com cantos arredondados) ----
     card_x = MARGIN_X
     card_w = video_disp_w
     card_h = video_disp_h
-    # Mascara do buraco no tamanho do canvas inteiro: branco onde fica o video
     hole_full = Image.new("L", (CANVAS_W, CANVAS_H), 0)
     hole_card = Image.new("L", (card_w, card_h), 0)
     ImageDraw.Draw(hole_card).rounded_rectangle((0, 0, card_w, card_h), radius=CARD_RADIUS, fill=255)
     hole_full.paste(hole_card, (card_x, video_y))
-    # alpha final = alpha_atual onde NAO ha buraco; 0 onde ha buraco
     alpha = img.split()[3]
-    # onde hole_full==255 -> alpha 0 ; senao mantem
-    inv = Image.eval(hole_full, lambda v: 255 - v)  # 0 no buraco, 255 fora
+    inv = Image.eval(hole_full, lambda v: 255 - v)
     new_alpha = ImageChops.multiply(alpha, inv.point(lambda v: 255 if v > 127 else 0))
     img.putalpha(new_alpha)
 
@@ -202,19 +222,12 @@ def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
 
 
 def wrap_text(text, font, max_w, draw):
-    """Quebra o texto em linhas para caber em max_w, MAS respeitando as
-    quebras de linha que o usuario digitou (Enter). Uma linha em branco
-    digitada pelo usuario vira uma linha em branco no resultado."""
     linhas_finais = []
-    # primeiro separa pelos Enters do usuario (cada item e um "paragrafo")
-    # normaliza quebras do Windows (\r\n) e Mac antigo (\r)
     texto = text.replace("\r\n", "\n").replace("\r", "\n")
     for paragrafo in texto.split("\n"):
         if paragrafo.strip() == "":
-            # linha em branco digitada -> mantem o respiro
             linhas_finais.append("")
             continue
-        # dentro do paragrafo, quebra por largura
         cur = ""
         for w in paragrafo.split():
             test = (cur + " " + w).strip()
@@ -230,61 +243,51 @@ def wrap_text(text, font, max_w, draw):
     return linhas_finais
 
 
-def make_post(video_path, caption, output_path, perfil=None):
+def make_post(video_path, caption, output_path, perfil=None, uniqueness=None):
     if perfil:
         set_perfil(perfil)
-    return _gerar(video_path, caption, output_path, crop=None)
+    return _gerar(video_path, caption, output_path, crop=None, uniqueness=uniqueness)
 
 
-def make_post_from_crop(video_path, caption, output_path, crop, perfil=None):
-    """crop = (x, y, w, h) em pixels do video de entrada: recorta essa regiao
-    (mantendo audio) e monta no template."""
+def make_post_from_crop(video_path, caption, output_path, crop, perfil=None, uniqueness=None):
     if perfil:
         set_perfil(perfil)
-    return _gerar(video_path, caption, output_path, crop=crop)
+    return _gerar(video_path, caption, output_path, crop=crop, uniqueness=uniqueness)
 
 
-def _gerar(video_path, caption, output_path, crop=None):
+def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
     vw, vh = get_video_size(video_path)
+    
     if crop is not None:
         cx0, cy0, cw0, ch0 = [int(round(v)) for v in crop]
-        # garante limites validos dentro do video
         cx0 = max(0, min(cx0, vw - 2))
         cy0 = max(0, min(cy0, vh - 2))
         cw0 = max(2, min(cw0, vw - cx0))
         ch0 = max(2, min(ch0, vh - cy0))
-        # H.264 exige dimensoes pares: arredonda para baixo
         cw0 -= cw0 % 2
         ch0 -= ch0 % 2
-        cw0 = max(2, cw0)
-        ch0 = max(2, ch0)
         aspect = cw0 / ch0
     else:
         aspect = vw / vh
 
-    # Largura do card = largura util; altura proporcional ao video
     card_w = CANVAS_W - 2 * MARGIN_X
     card_h = int(card_w / aspect)
 
-    # Mede a legenda para calcular a altura do bloco
     f_caption = _font(FONT_REG, 44)
     tmp_img = Image.new("RGB", (10, 10))
     tmp_draw = ImageDraw.Draw(tmp_img)
     lines = wrap_text(caption, f_caption, CANVAS_W - 2 * MARGIN_X, tmp_draw)
     caption_block_h = len(lines) * 58
 
-    # Espacamentos internos do bloco
-    GAP_HEADER_CAP = 50   # cabecalho -> legenda
-    GAP_CAP_VIDEO = 40    # legenda -> video
-
-    # Garante que o card cabe na largura util do canvas (com margem vertical)
+    GAP_HEADER_CAP = 50
+    GAP_CAP_VIDEO = 40
     margem_seg = 80
     altura_disp = CANVAS_H - 2 * margem_seg
-    # altura total do bloco com o card atual
+
     def altura_bloco(ch):
         return AVATAR_SIZE + GAP_HEADER_CAP + caption_block_h + GAP_CAP_VIDEO + ch
+
     if altura_bloco(card_h) > altura_disp:
-        # encolhe o card para o bloco caber
         sobra = AVATAR_SIZE + GAP_HEADER_CAP + caption_block_h + GAP_CAP_VIDEO
         card_h = max(2, altura_disp - sobra)
         card_w = int(card_h * aspect)
@@ -292,13 +295,11 @@ def _gerar(video_path, caption, output_path, crop=None):
             card_w = CANVAS_W - 2 * MARGIN_X
             card_h = int(card_w / aspect)
 
-    # H.264 exige dimensoes pares no card
     card_w -= card_w % 2
     card_h -= card_h % 2
     card_w = max(2, card_w)
     card_h = max(2, card_h)
 
-    # Centraliza o bloco inteiro verticalmente
     bloco_h = altura_bloco(card_h)
     header_y = max(margem_seg, (CANVAS_H - bloco_h) // 2)
     video_y = header_y + AVATAR_SIZE + GAP_HEADER_CAP + caption_block_h + GAP_CAP_VIDEO
@@ -309,20 +310,19 @@ def _gerar(video_path, caption, output_path, crop=None):
         overlay_path = os.path.join(td, "overlay.png")
         overlay.save(overlay_path)
 
-        # FFmpeg: escala o video para o card, coloca sobre fundo branco,
-        # aplica cantos arredondados, e poe o overlay (template) por cima.
-        audio = has_audio(video_path)
-        dur = get_duration(video_path)
+        # === APLICA ANTI-DETECÇÃO ===
+        source_video = video_path
+        if uniqueness:
+            temp_video = os.path.join(td, "uniquified.mp4")
+            apply_uniqueness_filters(video_path, temp_video, uniqueness)
+            source_video = temp_video
 
-        # Prefixo de recorte da fonte (quando o usuario recortou o card do
-        # video do concorrente). Aplicado ANTES de escalar para o card.
+        # Filter Complex (mantido igual)
         if crop is not None:
             crop_prefix = f"crop={cw0}:{ch0}:{cx0}:{cy0},"
         else:
             crop_prefix = ""
 
-        # Fundo branco via source 'color' (estavel com video).
-        # Camadas: color branco -> video (recortado/escalado) -> template com buraco.
         filter_complex = (
             f"color=white:s={CANVAS_W}x{CANVAS_H}:r=30[bgc];"
             f"[0:v]{crop_prefix}scale={cw}:{ch}:force_original_aspect_ratio=increase,"
@@ -333,18 +333,21 @@ def _gerar(video_path, caption, output_path, crop=None):
 
         cmd = [
             "ffmpeg", "-y",
-            "-i", video_path,
-            "-framerate", "30", "-loop", "1", "-t", f"{dur}", "-i", overlay_path,
+            "-i", source_video,
+            "-framerate", "30", "-loop", "1", "-t", str(get_duration(source_video)), "-i", overlay_path,
             "-filter_complex", filter_complex,
             "-map", "[outv]",
         ]
-        if audio:
-            cmd += ["-map", "0:a", "-c:a", "aac", "-b:a", "128k"]
+
+        if has_audio(source_video):
+            cmd += ["-map", "0:a", "-c:a", "aac", "-b:a", "192k"]
+
         cmd += [
             "-c:v", "libx264", "-pix_fmt", "yuv420p",
             "-shortest", "-movflags", "+faststart",
             output_path
         ]
+
         run(cmd)
 
     return output_path
