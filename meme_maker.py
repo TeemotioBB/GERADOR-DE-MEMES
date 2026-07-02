@@ -9,7 +9,6 @@ import sys
 import json
 import subprocess
 import tempfile
-import textwrap
 from PIL import Image, ImageDraw, ImageFont, ImageChops
 
 # ----------------- CONFIGURACOES FIXAS DO TEMPLATE -----------------
@@ -17,7 +16,7 @@ CANVAS_W = 1080
 CANVAS_H = 1920          
 BG_COLOR = (255, 255, 255)
 
-_BASE = os.path.dirname(os.path.abspath(__file__))
+BASE = os.path.dirname(os.path.abspath(file_))
 
 # ----------------- PERFIS DISPONIVEIS -----------------
 PERFIS = {
@@ -49,12 +48,12 @@ def set_perfil(chave):
 
 def _achar_fonte(*nomes):
     pastas = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "fontes"),
+        os.path.join(os.path.dirname(os.path.abspath(_file_)), "fontes"),
         "/usr/share/fonts/truetype/liberation",
         "/usr/share/fonts/truetype/dejavu",
         os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts"),
         "/Library/Fonts", "/System/Library/Fonts", "/System/Library/Fonts/Supplemental",
-        os.path.dirname(os.path.abspath(__file__)),
+        os.path.dirname(os.path.abspath(_file_)),
     ]
     for nome in nomes:
         if os.path.isabs(nome) and os.path.exists(nome):
@@ -109,7 +108,7 @@ def get_duration(path):
     return float(json.loads(res.stdout)["format"]["duration"])
 
 
-# ====================== NOVA FUNÇÃO ANTI-DETECÇÃO ======================
+# ====================== ANTI-DETECÇÃO (QUALIDADE VISUAL) ======================
 def apply_uniqueness_filters(input_path, output_path, options=None):
     """
     Versão focada em QUALIDADE VISUAL - alterações quase imperceptíveis
@@ -138,9 +137,13 @@ def apply_uniqueness_filters(input_path, output_path, options=None):
         filters.append(f"setpts={1/speed}*PTS")
         audio_filters.append(f"atempo={speed}")
 
-    # 5. Fade in/out suave
+    # 5. Fade in/out suave (corrigido)
     if options.get("fade", True):
-        filters.append("fade=t=in:st=0:d=0.3,fade=t=out:st=duration-0.3:d=0.3")
+        dur = get_duration(input_path)
+        fade_dur = 0.3
+        fade_out_start = max(0, dur - fade_dur)
+        filters.append(f"fade=t=in:st=0:d={fade_dur}")
+        filters.append(f"fade=t=out:st={fade_out_start:.3f}:d={fade_dur}")
 
     # Re-encode de alta qualidade
     crf = options.get("crf", 20)
@@ -174,7 +177,7 @@ def apply_uniqueness_filters(input_path, output_path, options=None):
     return output_path
 
 
-# ====================== FUNÇÕES EXISTENTES ======================
+# ====================== BUILD OVERLAY ======================
 def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG_COLOR + (255,))
     draw = ImageDraw.Draw(img)
@@ -183,7 +186,6 @@ def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
     f_handle = _font(FONT_REG, 36)
     f_caption = _font(FONT_REG, 44)
 
-    # Avatar, nome, handle, legenda... (mantido igual)
     if os.path.exists(AVATAR_PATH):
         av = Image.open(AVATAR_PATH).convert("RGBA").resize((AVATAR_SIZE, AVATAR_SIZE), Image.LANCZOS)
         escala = 4
@@ -243,6 +245,7 @@ def wrap_text(text, font, max_w, draw):
     return linhas_finais
 
 
+# ====================== FUNÇÕES PRINCIPAIS ======================
 def make_post(video_path, caption, output_path, perfil=None, uniqueness=None):
     if perfil:
         set_perfil(perfil)
@@ -317,7 +320,6 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
             apply_uniqueness_filters(video_path, temp_video, uniqueness)
             source_video = temp_video
 
-        # Filter Complex (mantido igual)
         if crop is not None:
             crop_prefix = f"crop={cw0}:{ch0}:{cx0}:{cy0},"
         else:
@@ -353,7 +355,7 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
     return output_path
 
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     if len(sys.argv) < 4:
         print("Uso: python3 meme_maker.py <video> <legenda> <saida.mp4>")
         sys.exit(1)
