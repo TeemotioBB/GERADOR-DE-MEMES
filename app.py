@@ -1,283 +1,202 @@
-from __future__ import annotations
-
-import os
-from pathlib import Path
-
-import gradio as gr
-import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-
-from core.config import APP_NAME, WORK_ROOT
-from core.media import MediaError, probe_video
-from core.processor import cleanup_old_jobs, process_video
-from core.transition import detect_static_intro_end
-
-cleanup_old_jobs()
-
-CSS = """
-.gradio-container {max-width: 1180px !important;}
-.hero {padding: 18px 20px; border: 1px solid var(--border-color-primary); border-radius: 18px;}
-.hero h1 {margin-bottom: 6px !important;}
-.small-note {font-size: 0.92rem; opacity: 0.82;}
-#generate-btn {min-height: 48px; font-weight: 700;}
+#!/usr/bin/env python3
+"""
+Servidor web local do Gerador de Memes (Adulto Sofrido).
 """
 
+import os
+import io
+import uuid
+import zipfile
+import tempfile
+import threading
+import time
+from flask import Flask, request, send_file, render_template, jsonify
+from werkzeug.utils import secure_filename
 
-def transition_visibility(choice: str):
-    return gr.update(visible=choice == "Informar o segundo manualmente")
+import meme_maker
+import detector
+import cv2
+import base64
 
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 
-def caption_visibility(choice: str):
-    return gr.update(visible=choice == "Usar um texto fixo")
+WORK_DIR = os.path.join(tempfile.gettempdir(), "gerador_memes")
+os.makedirs(WORK_DIR, exist_ok=True)
 
-
-def analyze_video(video_path: str | None):
-    if not video_path:
-        raise gr.Error("Envie o vídeo primeiro.")
-    try:
-        info = probe_video(video_path)
-        detected = detect_static_intro_end(video_path)
-    except MediaError as exc:
-        raise gr.Error(str(exc)) from exc
-
-    if detected.seconds is None:
-        text = (
-            "### Análise do vídeo\n"
-            f"- Duração: {info.duration:.2f}s\n"
-            f"- Tamanho original: {info.width}×{info.height}\n"
-            f"- FPS: {info.fps:.2f}\n"
-            f"- Áudio: {'sim' if info.has_audio else 'não'}\n"
-            f"- Resultado: {detected.message}\n\n"
-            "Você pode escolher **Sem vídeo de continuação** ou informar o segundo manualmente."
-        )
-        return text, None
-
-    text = (
-        "### Análise do vídeo\n"
-        f"- Duração: {info.duration:.2f}s\n"
-        f"- Tamanho original: {info.width}×{info.height}\n"
-        f"- FPS: {info.fps:.2f}\n"
-        f"- Áudio: {'sim' if info.has_audio else 'não'}\n"
-        f"- Transição provável: **{detected.seconds:.2f}s**\n"
-        f"- Confiança aproximada: {detected.confidence:.0%}\n\n"
-        "A geração automática usará esse ponto. Se estiver errado, selecione o modo manual."
-    )
-    return text, detected.seconds
+RESULTS = {}
+UPLOADS = {}
 
 
-def generate_video(
-    photo_path: str | None,
-    video_path: str | None,
-    transition_mode: str,
-    manual_transition_seconds: float | None,
-    caption_mode: str,
-    manual_caption_text: str,
-    caption_position: str,
-    caption_font_percent: float,
-    continuation_fit_mode: str,
-    language_label: str,
-    progress=gr.Progress(),
-):
-    language_map = {
-        "Português": "pt",
-        "Detectar automaticamente": "",
-        "Inglês": "en",
-        "Espanhol": "es",
-    }
+def _limpar_depois(paths, delay=3600):
+    def job():
+        time.sleep(delay)
+        for p in paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    threading.Thread(target=job, daemon=True).start()
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/detectar", methods=["POST"])
+def detectar():
+    if "video" not in request.files:
+        return jsonify({"erro": "Nenhum video enviado."}), 400
+    video = request.files["video"]
+    if video.filename == "":
+        return jsonify({"erro": "Nenhum video selecionado."}), 400
+
+    job_id = uuid.uuid4().hex
+    nome_seguro = secure_filename(video.filename) or "video.mp4"
+    entrada = os.path.join(WORK_DIR, f"{job_id}_in_{nome_seguro}")
+    video.save(entrada)
 
     try:
-        result = process_video(
-            photo_path=photo_path or "",
-            video_path=video_path or "",
-            transition_mode=transition_mode,
-            manual_transition_seconds=manual_transition_seconds,
-            caption_mode=caption_mode,
-            manual_caption_text=manual_caption_text or "",
-            caption_position=caption_position,
-            caption_font_percent=float(caption_font_percent),
-            continuation_fit_mode=continuation_fit_mode,
-            language=language_map.get(language_label, "pt"),
-            progress=lambda value, description: progress(value, desc=description),
-        )
-    except MediaError as exc:
-        raise gr.Error(str(exc)) from exc
-    except Exception as exc:
-        raise gr.Error(f"Erro inesperado: {exc}") from exc
+        vw, vh = meme_maker.get_video_size(entrada)
+        dur = meme_maker.get_duration(entrada)
+        frame_path = os.path.join(WORK_DIR, f"{job_id}_frame.png")
+        
+        meme_maker.run([
+            "ffmpeg", "-y", "-ss", f"{dur/2:.2f}", "-i", entrada,
+            "-frames:v", "1", "-update", "1", frame_path
+        ])
+        
+        img = cv2.imread(frame_path)
+        box = detector.detectar_card(img)
+        conf = detector.confianca(img, box)
+        
+        if box is None:
+            box = (int(vw * 0.08), int(vh * 0.30), int(vw * 0.84), int(vw * 0.84))
+            conf = 0.0
+            
+        with open(frame_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        os.remove(frame_path)
+    except Exception as e:
+        try:
+            os.remove(entrada)
+        except OSError:
+            pass
+        return jsonify({"erro": f"Falha ao analisar: {e}"}), 500
 
-    return result.output_path, result.report, result.transition_seconds
+    UPLOADS[job_id] = {"path": entrada, "nome": nome_seguro}
+    _limpar_depois([entrada])
 
-
-with gr.Blocks(title=APP_NAME) as demo:
-    gr.Markdown(
-        """
-        <div class="hero">
-          <h1>Foto + Vídeo Automático</h1>
-          <p>Troca somente a foto estática inicial, recria a legenda, mantém o áudio original e preserva o vídeo de continuação.</p>
-        </div>
-        """
-    )
-
-    with gr.Row(equal_height=False):
-        with gr.Column(scale=1):
-            photo = gr.File(
-                label="1. Foto nova da personagem",
-                file_types=["image"],
-                type="filepath",
-            )
-            video = gr.File(
-                label="2. Vídeo com áudio e possível continuação",
-                file_types=["video"],
-                type="filepath",
-            )
-            gr.Markdown(
-                "A proporção final segue a foto. No Railway, o maior lado é limitado a 1920 px por padrão para evitar estouro de memória; isso pode ser alterado por variável de ambiente.",
-                elem_classes=["small-note"],
-            )
-
-            analyze_button = gr.Button("Analisar vídeo antes de gerar", variant="secondary")
-            analysis_result = gr.Markdown()
-
-        with gr.Column(scale=1):
-            transition_mode = gr.Radio(
-                choices=[
-                    "Detectar automaticamente",
-                    "Informar o segundo manualmente",
-                    "Sem vídeo de continuação",
-                ],
-                value="Detectar automaticamente",
-                label="Onde termina a foto estática?",
-            )
-            manual_transition = gr.Number(
-                label="Segundo em que começa o vídeo de continuação",
-                value=5.0,
-                minimum=0.01,
-                visible=False,
-            )
-
-            continuation_fit = gr.Radio(
-                choices=[
-                    "Manter inteiro com fundo desfocado",
-                    "Barras pretas",
-                    "Preencher a tela (pode cortar bordas)",
-                ],
-                value="Manter inteiro com fundo desfocado",
-                label="Como encaixar o vídeo de continuação no tamanho da foto?",
-            )
-
-            caption_mode = gr.Radio(
-                choices=[
-                    "Transcrever o áudio automaticamente",
-                    "Usar um texto fixo",
-                    "Sem legenda",
-                ],
-                value="Transcrever o áudio automaticamente",
-                label="Legenda da parte da foto",
-            )
-            manual_caption = gr.Textbox(
-                label="Texto da legenda",
-                placeholder="Digite a frase que ficará sobre a foto...",
-                lines=3,
-                visible=False,
-            )
-
-            with gr.Row():
-                caption_position = gr.Dropdown(
-                    choices=["Centro", "Centro inferior", "Centro superior"],
-                    value="Centro",
-                    label="Posição",
-                )
-                caption_size = gr.Slider(
-                    minimum=2.5,
-                    maximum=8.0,
-                    value=4.6,
-                    step=0.1,
-                    label="Tamanho da fonte (% da altura)",
-                )
-
-            language = gr.Dropdown(
-                choices=["Português", "Detectar automaticamente", "Inglês", "Espanhol"],
-                value="Português",
-                label="Idioma da transcrição",
-            )
-
-    generate_button = gr.Button("GERAR VÍDEO", variant="primary", elem_id="generate-btn")
-
-    with gr.Row(equal_height=False):
-        output_video = gr.Video(label="Vídeo pronto")
-        with gr.Column():
-            report = gr.Markdown()
-            transition_used = gr.Number(label="Segundo da transição usado", interactive=False)
-
-    transition_mode.change(
-        fn=transition_visibility,
-        inputs=transition_mode,
-        outputs=manual_transition,
-    )
-    caption_mode.change(
-        fn=caption_visibility,
-        inputs=caption_mode,
-        outputs=manual_caption,
-    )
-    analyze_button.click(
-        fn=analyze_video,
-        inputs=video,
-        outputs=[analysis_result, manual_transition],
-    )
-    generate_button.click(
-        fn=generate_video,
-        inputs=[
-            photo,
-            video,
-            transition_mode,
-            manual_transition,
-            caption_mode,
-            manual_caption,
-            caption_position,
-            caption_size,
-            continuation_fit,
-            language,
-        ],
-        outputs=[output_video, report, transition_used],
-        api_name="generate",
-    )
+    return jsonify({
+        "id": job_id,
+        "largura": vw, "altura": vh,
+        "box": {"x": box[0], "y": box[1], "w": box[2], "h": box[3]},
+        "confianca": conf,
+        "frame": "data:image/png;base64," + b64,
+    })
 
 
-demo.queue(max_size=8, default_concurrency_limit=1)
+@app.route("/gerar", methods=["POST"])
+def gerar():
+    dados = request.json if request.is_json else {}
+    job_id = dados.get("id")
+    legenda = (dados.get("legenda") or "").strip()
+    crop = dados.get("crop")
+    perfil = dados.get("perfil")
 
-fastapi_app = FastAPI(title=APP_NAME)
+    # === NOVAS OPÇÕES DE ANTI-DETECÇÃO ===
+    uniqueness = dados.get("uniqueness", {})
+    # Configuração padrão focada em qualidade
+    if not uniqueness:
+        uniqueness = {
+            "light_crop": True,
+            "color_adjust": True,
+            "subtle_grain": True,
+            "speed_factor": 1.01,
+            "fade": True,
+            "crf": 20
+        }
+
+    item = UPLOADS.get(job_id)
+    if not item or not os.path.exists(item["path"]):
+        return jsonify({"erro": "Vídeo expirado. Adicione novamente."}), 404
+    if not legenda:
+        return jsonify({"erro": "Digite uma legenda."}), 400
+
+    entrada = item["path"]
+    saida = os.path.join(WORK_DIR, f"{job_id}_post.mp4")
+
+    try:
+        if crop and all(k in crop for k in ("x", "y", "w", "h")):
+            regiao = (crop["x"], crop["y"], crop["w"], crop["h"])
+            meme_maker.make_post_from_crop(entrada, legenda, saida, regiao, perfil=perfil, uniqueness=uniqueness)
+        else:
+            meme_maker.make_post(entrada, legenda, saida, perfil=perfil, uniqueness=uniqueness)
+    except Exception as e:
+        return jsonify({"erro": f"Falha ao gerar: {e}"}), 500
+
+    base = os.path.splitext(item["nome"])[0]
+    nome_saida = f"post_{base}.mp4"
+    RESULTS[job_id] = {"path": saida, "nome": nome_saida}
+    _limpar_depois([saida])
+    return jsonify({"id": job_id})
 
 
-@fastapi_app.get("/health")
-def health():
-    return JSONResponse({"status": "ok"})
+@app.route("/zip", methods=["POST"])
+def baixar_zip():
+    ids = request.json.get("ids", []) if request.is_json else []
+    if not ids:
+        return "Nenhum item para baixar.", 400
+
+    buf = io.BytesIO()
+    usados = set()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for job_id in ids:
+            item = RESULTS.get(job_id)
+            if not item or not os.path.exists(item["path"]):
+                continue
+            nome = item["nome"]
+            n = nome
+            i = 2
+            while n in usados:
+                base, ext = os.path.splitext(nome)
+                n = f"{base}_{i}{ext}"
+                i += 1
+            usados.add(n)
+            zf.write(item["path"], n)
+
+    if not usados:
+        return "Arquivos expirados. Gere novamente.", 404
+
+    buf.seek(0)
+    return send_file(buf, mimetype="application/zip",
+                     as_attachment=True, download_name="posts.zip")
 
 
-@fastapi_app.get("/api/info")
-def api_info():
-    return {
-        "name": APP_NAME,
-        "work_root": str(WORK_ROOT),
-        "status": "online",
-    }
+@app.route("/baixar/<job_id>")
+def baixar(job_id):
+    item = RESULTS.get(job_id)
+    if not item or not os.path.exists(item["path"]):
+        return "Arquivo expirado ou inexistente. Gere novamente.", 404
+    return send_file(item["path"], as_attachment=True, download_name=item["nome"])
 
 
-username = os.getenv("APP_USERNAME", "").strip()
-password = os.getenv("APP_PASSWORD", "").strip()
-auth = (username, password) if username and password else None
-
-app = gr.mount_gradio_app(
-    fastapi_app,
-    demo,
-    path="/",
-    allowed_paths=[str(Path(WORK_ROOT).resolve())],
-    max_file_size=os.getenv("MAX_UPLOAD_SIZE", "500mb"),
-    auth=auth,
-    show_error=True,
-    css=CSS,
-)
+@app.route("/preview/<job_id>")
+def preview(job_id):
+    item = RESULTS.get(job_id)
+    if not item or not os.path.exists(item["path"]):
+        return "Arquivo expirado.", 404
+    return send_file(item["path"], mimetype="video/mp4")
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "7860"))
-    uvicorn.run(app, host="0.0.0.0", port=port, proxy_headers=True, forwarded_allow_ips="*")
+    porta = int(os.environ.get("PORT", 5000))
+    na_nuvem = "PORT" in os.environ
+    host = "0.0.0.0" if na_nuvem else "127.0.0.1"
+    if not na_nuvem:
+        print("\n" + "=" * 50)
+        print("  Gerador de Memes - Adulto Sofrido")
+        print("  Abra no navegador: http://localhost:5000")
+        print("=" * 50 + "\n")
+    app.run(host=host, port=porta, debug=False)
