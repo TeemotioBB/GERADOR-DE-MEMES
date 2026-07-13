@@ -222,12 +222,6 @@
     </select>
   </div>
 
-  <div class="token-bar">
-    <label>🔑 Chave Claude</label>
-    <input type="password" id="claudeToken" placeholder="sk-ant-api03-..." autocomplete="off">
-    <a href="https://console.anthropic.com/settings/keys" target="_blank">Obter chave →</a>
-  </div>
-
   <div class="card">
     <div class="dropzone" id="dropzone">
       <div>📁 Arraste os reels aqui ou <strong>clique para escolher</strong></div>
@@ -310,8 +304,7 @@
       it.jobId = j.id; it.vw = j.largura; it.vh = j.altura;
       it.frame = j.frame; it.box = j.box; it.conf = j.confianca;
       it.estado = j.confianca >= 0.6 ? 'auto' : 'conferir';
-      const token = document.getElementById('claudeToken').value.trim();
-      if (token && it.frame) lerLegenda(it);
+      if (it.frame) lerLegenda(it);
     } catch(err){
       it.estado = 'erro_analise';
       it.msgErro = err.message;
@@ -320,44 +313,41 @@
   }
 
   async function lerLegenda(it){
-    const token = document.getElementById('claudeToken').value.trim();
-    if (!token || !it.frame) return;
+    if (!it.frame) return;
     try {
       const imgEl = new Image();
-      await new Promise(r => { imgEl.onload = r; imgEl.src = it.frame; });
+      await new Promise((resolve, reject) => {
+        imgEl.onload = resolve;
+        imgEl.onerror = reject;
+        imgEl.src = it.frame;
+      });
       const scaleY = imgEl.naturalHeight / it.vh;
       const faixaH = Math.round(it.box.y * scaleY);
       if (faixaH < 20) return;
+
       const canvas = document.createElement('canvas');
       canvas.width = imgEl.naturalWidth;
       canvas.height = faixaH;
       canvas.getContext('2d').drawImage(imgEl, 0, 0);
       const b64 = canvas.toDataURL('image/png').split(',')[1];
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+
+      const resp = await fetch('/ler-legenda', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': token,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true'
-        },
-        body: JSON.stringify({
-          model: 'claude-haiku-4-5-20251001',
-          max_tokens: 512,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: b64 } },
-              { type: 'text', text: 'Essa é a parte de cima de um post de rede social. Extraia APENAS o texto da legenda (não o nome nem o @). Copie exatamente como está, com emojis e quebras de linha. Retorne só o texto, sem explicação.' }
-            ]
-          }]
-        })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imagem: b64 })
       });
       const j = await resp.json();
-      if (!resp.ok) return;
-      const texto = j.content[0].text.trim();
-      if (texto){ it.legenda = texto; render(); }
-    } catch(e) { /* silencioso */ }
+      if (!resp.ok) throw new Error(j.erro || 'Falha ao ler a legenda.');
+
+      const texto = (j.texto || '').trim();
+      if (texto){
+        it.legenda = texto;
+        render();
+      }
+    } catch(e) {
+      it.msgErro = e.message || 'Falha ao ler a legenda com o Claude.';
+      render();
+    }
   }
 
   function remover(localId){
@@ -448,8 +438,6 @@
     if (!it.frame) btnLer.disabled = true;
     btnLer.addEventListener('click', async () => {
       if (!it.frame) return;
-      const token = document.getElementById('claudeToken').value.trim();
-      if (!token){ alert('Cole sua chave da API Claude no campo no topo da página.'); return; }
       btnLer.disabled = true;
       btnLer.classList.add('lendo');
       btnLer.innerHTML = '⏳ Lendo...';
