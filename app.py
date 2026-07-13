@@ -10,6 +10,9 @@ import zipfile
 import tempfile
 import threading
 import time
+import json
+import urllib.request
+import urllib.error
 from flask import Flask, request, send_file, render_template, jsonify
 from werkzeug.utils import secure_filename
 
@@ -26,6 +29,10 @@ os.makedirs(WORK_DIR, exist_ok=True)
 
 RESULTS = {}
 UPLOADS = {}
+
+# A chave fica somente no servidor/Railway e nunca é enviada ao navegador.
+CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "").strip()
+CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001").strip()
 
 
 def _limpar_depois(paths, delay=3600):
@@ -95,6 +102,85 @@ def detectar():
         "confianca": conf,
         "frame": "data:image/png;base64," + b64,
     })
+
+
+@app.route("/ler-legenda", methods=["POST"])
+def ler_legenda():
+    if not CLAUDE_API_KEY:
+        return jsonify({
+            "erro": "A variável CLAUDE_API_KEY não está configurada no Railway."
+        }), 500
+
+    dados = request.get_json(silent=True) or {}
+    imagem_b64 = (dados.get("imagem") or "").strip()
+    if not imagem_b64:
+        return jsonify({"erro": "Nenhuma imagem foi enviada para leitura."}), 400
+
+    payload = {
+        "model": CLAUDE_MODEL,
+        "max_tokens": 512,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": imagem_b64
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "Essa é a parte de cima de um post de rede social. "
+                        "Extraia APENAS o texto da legenda (não o nome nem o @). "
+                        "Copie exatamente como está, com emojis e quebras de linha. "
+                        "Retorne só o texto, sem explicação."
+                    )
+                }
+            ]
+        }]
+    }
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": CLAUDE_API_KEY,
+            "anthropic-version": "2023-06-01"
+        }
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resposta:
+            retorno = json.loads(resposta.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detalhe = ""
+        try:
+            erro_api = json.loads(e.read().decode("utf-8"))
+            detalhe = erro_api.get("error", {}).get("message", "")
+        except Exception:
+            pass
+        mensagem = detalhe or f"Claude retornou erro HTTP {e.code}."
+        return jsonify({"erro": mensagem}), 502
+    except urllib.error.URLError as e:
+        return jsonify({"erro": f"Não foi possível conectar ao Claude: {e.reason}"}), 502
+    except Exception as e:
+        return jsonify({"erro": f"Falha ao consultar o Claude: {e}"}), 500
+
+    blocos = retorno.get("content") or []
+    texto = next(
+        (bloco.get("text", "").strip() for bloco in blocos
+         if bloco.get("type") == "text" and bloco.get("text")),
+        ""
+    )
+    if not texto:
+        return jsonify({"erro": "O Claude não retornou uma legenda."}), 502
+
+    return jsonify({"texto": texto})
 
 
 @app.route("/gerar", methods=["POST"])
