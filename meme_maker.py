@@ -8,7 +8,16 @@ import sys
 import json
 import subprocess
 import tempfile
+from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont, ImageChops
+
+try:
+    from pilmoji import Pilmoji
+    from pilmoji.source import BaseSource, TwitterEmojiSource
+except ImportError:
+    Pilmoji = None
+    BaseSource = object
+    TwitterEmojiSource = None
 
 # ----------------- CONFIGURACOES FIXAS DO TEMPLATE -----------------
 CANVAS_W = 1080
@@ -72,6 +81,67 @@ def _font(caminho, tamanho):
     if caminho:
         return ImageFont.truetype(caminho, tamanho)
     return ImageFont.load_default()
+
+
+def _achar_fonte_emoji():
+    """Procura uma fonte colorida de emojis instalada no sistema."""
+    caminhos = [
+        os.path.join(_BASE, "fontes", "NotoColorEmoji.ttf"),
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+        "/usr/local/share/fonts/NotoColorEmoji.ttf",
+    ]
+    for caminho in caminhos:
+        if os.path.exists(caminho):
+            return caminho
+    return None
+
+
+class _FonteEmojiLocal(BaseSource):
+    """Transforma emojis da Noto Color Emoji em PNG para o Pilmoji."""
+
+    def __init__(self, caminho_fonte):
+        self.fonte = ImageFont.truetype(caminho_fonte, 109)
+        self.cache = {}
+
+    def get_emoji(self, emoji, /):
+        if emoji in self.cache:
+            return BytesIO(self.cache[emoji])
+
+        tamanho = 160
+        asset = Image.new("RGBA", (tamanho, tamanho), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(asset)
+        try:
+            bbox = draw.textbbox((0, 0), emoji, font=self.fonte, embedded_color=True)
+            largura = bbox[2] - bbox[0]
+            altura = bbox[3] - bbox[1]
+            x = (tamanho - largura) / 2 - bbox[0]
+            y = (tamanho - altura) / 2 - bbox[1]
+            draw.text((x, y), emoji, font=self.fonte, embedded_color=True)
+        except Exception:
+            return None
+
+        if asset.getbbox() is None:
+            return None
+
+        buf = BytesIO()
+        asset.save(buf, format="PNG")
+        dados = buf.getvalue()
+        self.cache[emoji] = dados
+        return BytesIO(dados)
+
+    def get_discord_emoji(self, id, /):
+        return None
+
+
+def _criar_fonte_emoji():
+    caminho = _achar_fonte_emoji()
+    if caminho and Pilmoji is not None:
+        try:
+            return _FonteEmojiLocal(caminho)
+        except Exception:
+            pass
+    return TwitterEmojiSource if TwitterEmojiSource is not None else None
 
 
 COLOR_NAME = (15, 20, 25)
@@ -192,10 +262,43 @@ def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
 
     caption_y = header_y + AVATAR_SIZE + 50
     max_w = CANVAS_W - 2 * MARGIN_X
-    lines = wrap_text(caption, f_caption, max_w, draw)
     line_h = 58
-    for i, line in enumerate(lines):
-        draw.text((MARGIN_X, caption_y + i * line_h), line, font=f_caption, fill=COLOR_CAPTION)
+
+    # Renderiza a legenda em uma camada separada para aceitar emojis coloridos.
+    legenda_renderizada = False
+    if Pilmoji is not None:
+        camada_legenda = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+        draw_legenda = ImageDraw.Draw(camada_legenda)
+        fonte_emoji = _criar_fonte_emoji()
+        if fonte_emoji is not None:
+            try:
+                with Pilmoji(
+                    camada_legenda,
+                    source=fonte_emoji,
+                    draw=draw_legenda,
+                    emoji_scale_factor=1.05,
+                    emoji_position_offset=(0, 4),
+                ) as emoji_draw:
+                    lines = wrap_text(caption, f_caption, max_w, draw_legenda, emoji_draw)
+                    for i, line in enumerate(lines):
+                        emoji_draw.text(
+                            (MARGIN_X, caption_y + i * line_h),
+                            line,
+                            font=f_caption,
+                            fill=COLOR_CAPTION,
+                            emoji_scale_factor=1.05,
+                            emoji_position_offset=(0, 4),
+                        )
+                img.alpha_composite(camada_legenda)
+                legenda_renderizada = True
+            except Exception:
+                legenda_renderizada = False
+
+    # Fallback: mantém o gerador funcionando mesmo se o serviço de emojis falhar.
+    if not legenda_renderizada:
+        lines = wrap_text(caption, f_caption, max_w, draw)
+        for i, line in enumerate(lines):
+            draw.text((MARGIN_X, caption_y + i * line_h), line, font=f_caption, fill=COLOR_CAPTION)
 
     card_x = MARGIN_X
     card_w = video_disp_w
@@ -212,7 +315,17 @@ def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
     return img, (card_x, video_y, card_w, card_h)
 
 
-def wrap_text(text, font, max_w, draw):
+def _largura_texto(texto, font, draw, emoji_draw=None):
+    if emoji_draw is not None:
+        try:
+            return emoji_draw.getsize(texto, font=font)[0]
+        except Exception:
+            pass
+    bbox = draw.textbbox((0, 0), texto, font=font)
+    return bbox[2] - bbox[0]
+
+
+def wrap_text(text, font, max_w, draw, emoji_draw=None):
     linhas_finais = []
     texto = text.replace("\r\n", "\n").replace("\r", "\n")
     for paragrafo in texto.split("\n"):
@@ -222,8 +335,7 @@ def wrap_text(text, font, max_w, draw):
         cur = ""
         for w in paragrafo.split():
             test = (cur + " " + w).strip()
-            bbox = draw.textbbox((0, 0), test, font=font)
-            if bbox[2] - bbox[0] <= max_w:
+            if _largura_texto(test, font, draw, emoji_draw) <= max_w:
                 cur = test
             else:
                 if cur:
