@@ -200,8 +200,10 @@ def gerar():
             "color_adjust": True,
             "subtle_grain": True,
             "speed_factor": 1.01,
-            "fade": True,
-            "crf": 20
+            "crf": 18,
+            "preset": "slow",
+            "deep_metadata_clean": True,
+            "remove_h264_sei": True
         }
 
     item = UPLOADS.get(job_id)
