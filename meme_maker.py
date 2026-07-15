@@ -177,63 +177,102 @@ def get_duration(path):
     return float(json.loads(res.stdout)["format"]["duration"])
 
 
-# ====================== ANTI-DETECÇÃO (QUALIDADE VISUAL) ======================
-def apply_uniqueness_filters(input_path, output_path, options=None):
-    if options is None:
-        options = {}
-
-    filters = []
-    audio_filters = []
-
-    # 1. Crop leve
-    if options.get("light_crop", True):
-        filters.append("crop=iw-4:ih-4")
-
-    # 2. Ajuste sutil de cor
-    if options.get("color_adjust", True):
-        filters.append("eq=brightness=0.012:saturation=1.018:contrast=1.008")
-
-    # 3. Ruído sutil
-    if options.get("subtle_grain", True):
-        filters.append("noise=alls=4:allf=t")
-
-    # 4. Micro speed
-    speed = options.get("speed_factor", 1.01)
-    if abs(speed - 1.0) > 0.001:
-        filters.append(f"setpts={1/speed}*PTS")
-        audio_filters.append(f"atempo={speed}")
-
-    # Fade removido completamente
-
-    # Re-encode alta qualidade
-    crf = options.get("crf", 20)
-    preset = options.get("preset", "slow")
-
-    cmd = ["ffmpeg", "-y", "-i", input_path]
-
-    if filters:
-        cmd += ["-vf", ",".join(filters)]
-
-    if audio_filters:
-        cmd += ["-af", ",".join(audio_filters)]
-
-    cmd += [
-        "-c:v", "libx264",
-        "-crf", str(crf),
-        "-preset", preset,
-        "-pix_fmt", "yuv420p",
+# ====================== PRIVACIDADE E QUALIDADE VISUAL ======================
+def _metadata_clean_args():
+    """Impede a cópia de dados pessoais e tags do arquivo de origem."""
+    return [
         "-map_metadata", "-1",
-        "-movflags", "+faststart"
+        "-map_chapters", "-1",
+        "-metadata", "title=",
+        "-metadata", "artist=",
+        "-metadata", "author=",
+        "-metadata", "comment=",
+        "-metadata", "description=",
+        "-metadata", "copyright=",
+        "-metadata", "creation_time=",
+        "-metadata", "date=",
+        "-metadata", "location=",
+        "-metadata", "location-eng=",
+        "-metadata", "make=",
+        "-metadata", "model=",
+        "-metadata", "software=",
+        "-metadata", "encoder=",
+        "-metadata:s:v:0", "title=",
+        "-metadata:s:v:0", "encoder=",
+        "-metadata:s:v:0", "handler_name=",
+        "-metadata:s:a:0", "title=",
+        "-metadata:s:a:0", "encoder=",
+        "-metadata:s:a:0", "handler_name=",
     ]
 
-    if has_audio(input_path):
-        cmd += ["-c:a", "aac", "-b:a", "192k"]
-    else:
-        cmd += ["-an"]
 
-    cmd.append(output_path)
+def deep_clean_mp4(input_path, output_path, remove_sei=True):
+    """Limpeza final por stream copy: não decodifica nem recomprime o vídeo."""
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-map", "0:v:0",
+        "-map", "0:a:0?",
+        "-c", "copy",
+        "-sn", "-dn",
+    ]
+    cmd += _metadata_clean_args()
+    cmd += ["-fflags", "+bitexact"]
+
+    # Como a saída principal é sempre H.264, remove mensagens SEI internas.
+    # Pode remover closed captions embutidas, mas não textos visíveis no vídeo.
+    if remove_sei:
+        cmd += ["-bsf:v", "filter_units=remove_types=6"]
+
+    cmd += ["-movflags", "+faststart", output_path]
     run(cmd)
     return output_path
+
+
+def _normalizar_opcoes_uniqueness(options):
+    """Normaliza opções antigas do navegador e garante qualidade CRF 18 ou melhor."""
+    options = dict(options or {})
+
+    try:
+        crf_solicitado = int(options.get("crf", 18))
+    except (TypeError, ValueError):
+        crf_solicitado = 18
+
+    # Um CRF menor significa mais qualidade. Nunca permite voltar para 20/23.
+    crf = max(0, min(crf_solicitado, 18))
+
+    try:
+        speed = float(options.get("speed_factor", 1.01))
+    except (TypeError, ValueError):
+        speed = 1.01
+    if speed <= 0:
+        speed = 1.0
+
+    return {
+        "light_crop": bool(options.get("light_crop", True)),
+        "color_adjust": bool(options.get("color_adjust", True)),
+        "subtle_grain": bool(options.get("subtle_grain", True)),
+        "speed_factor": speed,
+        "crf": crf,
+        "preset": str(options.get("preset", "slow") or "slow"),
+        "deep_metadata_clean": bool(options.get("deep_metadata_clean", True)),
+        "remove_h264_sei": bool(options.get("remove_h264_sei", True)),
+    }
+
+
+def _atempo_filter(speed):
+    """Monta uma cadeia atempo válida mesmo para valores fora de 0.5–2.0."""
+    fatores = []
+    restante = float(speed)
+
+    while restante > 2.0:
+        fatores.append(2.0)
+        restante /= 2.0
+    while restante < 0.5:
+        fatores.append(0.5)
+        restante /= 0.5
+
+    fatores.append(restante)
+    return ",".join(f"atempo={fator:.8f}" for fator in fatores)
 
 
 # ====================== RESTO DO CÓDIGO (mantido limpo) ======================
@@ -359,8 +398,17 @@ def make_post_from_crop(video_path, caption, output_path, crop, perfil=None, uni
 
 
 def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
+    """
+    Gera o post com UMA única codificação de vídeo.
+
+    Recorte, cor, grão, velocidade, redimensionamento e template são aplicados
+    no mesmo filter_complex. Depois há somente uma passagem de stream copy para
+    limpeza profunda, sem perda adicional de qualidade.
+    """
     vw, vh = get_video_size(video_path)
-    
+    tem_audio = has_audio(video_path)
+    opcoes = _normalizar_opcoes_uniqueness(uniqueness)
+
     if crop is not None:
         cx0, cy0, cw0, ch0 = [int(round(v)) for v in crop]
         cx0 = max(0, min(cx0, vw - 2))
@@ -369,6 +417,8 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
         ch0 = max(2, min(ch0, vh - cy0))
         cw0 -= cw0 % 2
         ch0 -= ch0 % 2
+        cw0 = max(2, cw0)
+        ch0 = max(2, ch0)
         aspect = cw0 / ch0
     else:
         aspect = vw / vh
@@ -407,52 +457,92 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
     header_y = max(margem_seg, (CANVAS_H - bloco_h) // 2)
     video_y = header_y + AVATAR_SIZE + GAP_HEADER_CAP + caption_block_h + GAP_CAP_VIDEO
 
-    overlay, (cx, cy, cw, ch) = build_overlay(caption, card_w, card_h, video_y, header_y)
+    overlay, (cx, cy, cw, ch) = build_overlay(
+        caption, card_w, card_h, video_y, header_y
+    )
+
+    # Todos os filtros visuais são acumulados aqui e executados uma única vez.
+    video_filters = []
+    if crop is not None:
+        video_filters.append(f"crop={cw0}:{ch0}:{cx0}:{cy0}")
+    if opcoes["light_crop"]:
+        video_filters.append("crop=iw-4:ih-4")
+    if opcoes["color_adjust"]:
+        video_filters.append("eq=brightness=0.012:saturation=1.018:contrast=1.008")
+    if opcoes["subtle_grain"]:
+        video_filters.append("noise=alls=4:allf=t")
+
+    speed = opcoes["speed_factor"]
+    if abs(speed - 1.0) > 0.001:
+        video_filters.append(f"setpts={1.0 / speed:.12f}*PTS")
+
+    video_filters += [
+        f"scale={cw}:{ch}:force_original_aspect_ratio=increase",
+        f"crop={cw}:{ch}",
+        "setsar=1",
+    ]
 
     with tempfile.TemporaryDirectory() as td:
         overlay_path = os.path.join(td, "overlay.png")
+        encoded_path = os.path.join(td, "post_encoded.mp4")
         overlay.save(overlay_path)
 
-        source_video = video_path
-        if uniqueness:
-            temp_video = os.path.join(td, "uniquified.mp4")
-            apply_uniqueness_filters(video_path, temp_video, uniqueness)
-            source_video = temp_video
+        partes = [
+            f"color=white:s={CANVAS_W}x{CANVAS_H}:r=30[bgc]",
+            f"[0:v:0]{','.join(video_filters)}[v]",
+            f"[bgc][v]overlay={cx}:{cy}:shortest=1[based]",
+            "[based][1:v:0]overlay=0:0:shortest=1[outv]",
+        ]
 
-        if crop is not None:
-            crop_prefix = f"crop={cw0}:{ch0}:{cx0}:{cy0},"
-        else:
-            crop_prefix = ""
+        if tem_audio:
+            if abs(speed - 1.0) > 0.001:
+                partes.append(f"[0:a:0]{_atempo_filter(speed)}[outa]")
+            else:
+                partes.append("[0:a:0]anull[outa]")
 
-        filter_complex = (
-            f"color=white:s={CANVAS_W}x{CANVAS_H}:r=30[bgc];"
-            f"[0:v]{crop_prefix}scale={cw}:{ch}:force_original_aspect_ratio=increase,"
-            f"crop={cw}:{ch},setsar=1[v];"
-            f"[bgc][v]overlay={cx}:{cy}:shortest=1[based];"
-            f"[based][1:v]overlay=0:0[outv]"
-        )
+        filter_complex = ";".join(partes)
 
         cmd = [
             "ffmpeg", "-y",
-            "-i", source_video,
-            "-framerate", "30", "-loop", "1", "-t", str(get_duration(source_video)), "-i", overlay_path,
+            "-i", video_path,
+            "-framerate", "30", "-loop", "1", "-i", overlay_path,
             "-filter_complex", filter_complex,
             "-map", "[outv]",
         ]
 
-        if has_audio(source_video):
-            cmd += ["-map", "0:a", "-c:a", "aac", "-b:a", "192k"]
+        if tem_audio:
+            cmd += ["-map", "[outa]", "-c:a", "aac", "-b:a", "192k"]
+        else:
+            cmd += ["-an"]
 
         cmd += [
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            "-shortest", "-movflags", "+faststart",
-            output_path
+            "-c:v", "libx264",
+            "-crf", str(opcoes["crf"]),
+            "-preset", opcoes["preset"],
+            "-pix_fmt", "yuv420p",
+            "-r", "30",
+            "-sn", "-dn",
+            "-shortest",
+        ]
+        cmd += _metadata_clean_args()
+        cmd += [
+            "-fflags", "+bitexact",
+            "-movflags", "+faststart",
+            encoded_path,
         ]
 
         run(cmd)
 
-    return output_path
+        if opcoes["deep_metadata_clean"]:
+            deep_clean_mp4(
+                encoded_path,
+                output_path,
+                remove_sei=opcoes["remove_h264_sei"],
+            )
+        else:
+            os.replace(encoded_path, output_path)
 
+    return output_path
 
 if __name__ == "__main__":
     if len(sys.argv) < 4:
