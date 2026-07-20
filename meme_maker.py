@@ -27,6 +27,18 @@ BG_COLOR = (255, 255, 255)
 _BASE = os.path.dirname(os.path.abspath(__file__))
 
 # ----------------- PERFIS DISPONIVEIS -----------------
+# Cada perfil pode sobrescrever apenas os valores visuais que quiser.
+# Assim, os dois perfis antigos permanecem exatamente como estavam.
+LAYOUT_PADRAO = {
+    "margin_x": 90,
+    "avatar_size": 110,
+    "text_gap_x": 28,
+    "gap_header_caption": 50,
+    "gap_caption_video": 40,
+    "card_radius": 28,
+    "safe_margin_y": 80,
+}
+
 PERFIS = {
     "adultosofrido": {
         "nome": "Adulto Sofrido",
@@ -38,6 +50,22 @@ PERFIS = {
         "handle": "@achadinhosofcs",
         "avatar": os.path.join(_BASE, "avatar2.png"),
     },
+    "viajantesofrida": {
+        "nome": "Viajante Sofrida",
+        "handle": "@viajantesofrida",
+        "avatar": os.path.join(_BASE, "avatar3.png"),
+        # Layout exclusivo deste perfil:
+        # vídeo mais largo, avatar menor e mais distância antes do vídeo.
+        "layout": {
+            "margin_x": 70,
+            "avatar_size": 96,
+            "text_gap_x": 22,
+            "gap_header_caption": 38,
+            "gap_caption_video": 62,
+            "card_radius": 18,
+            "safe_margin_y": 70,
+        },
+    },
 }
 PERFIL_PADRAO = "adultosofrido"
 
@@ -45,13 +73,34 @@ PROFILE_NAME = PERFIS[PERFIL_PADRAO]["nome"]
 PROFILE_HANDLE = PERFIS[PERFIL_PADRAO]["handle"]
 AVATAR_PATH = PERFIS[PERFIL_PADRAO]["avatar"]
 
+_layout_inicial = {**LAYOUT_PADRAO, **PERFIS[PERFIL_PADRAO].get("layout", {})}
+MARGIN_X = _layout_inicial["margin_x"]
+AVATAR_SIZE = _layout_inicial["avatar_size"]
+TEXT_GAP_X = _layout_inicial["text_gap_x"]
+GAP_HEADER_CAP = _layout_inicial["gap_header_caption"]
+GAP_CAP_VIDEO = _layout_inicial["gap_caption_video"]
+CARD_RADIUS = _layout_inicial["card_radius"]
+SAFE_MARGIN_Y = _layout_inicial["safe_margin_y"]
+
 
 def set_perfil(chave):
     global PROFILE_NAME, PROFILE_HANDLE, AVATAR_PATH
+    global MARGIN_X, AVATAR_SIZE, TEXT_GAP_X
+    global GAP_HEADER_CAP, GAP_CAP_VIDEO, CARD_RADIUS, SAFE_MARGIN_Y
+
     p = PERFIS.get(chave) or PERFIS[PERFIL_PADRAO]
+    layout = {**LAYOUT_PADRAO, **p.get("layout", {})}
+
     PROFILE_NAME = p["nome"]
     PROFILE_HANDLE = p["handle"]
     AVATAR_PATH = p["avatar"]
+    MARGIN_X = layout["margin_x"]
+    AVATAR_SIZE = layout["avatar_size"]
+    TEXT_GAP_X = layout["text_gap_x"]
+    GAP_HEADER_CAP = layout["gap_header_caption"]
+    GAP_CAP_VIDEO = layout["gap_caption_video"]
+    CARD_RADIUS = layout["card_radius"]
+    SAFE_MARGIN_Y = layout["safe_margin_y"]
 
 
 def _achar_fonte(*nomes):
@@ -148,10 +197,6 @@ COLOR_NAME = (15, 20, 25)
 COLOR_HANDLE = (83, 100, 113)
 COLOR_CAPTION = (15, 20, 25)
 
-MARGIN_X = 90
-HEADER_Y = 560
-AVATAR_SIZE = 110
-CARD_RADIUS = 28
 
 
 def run(cmd):
@@ -295,11 +340,11 @@ def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
         av.putalpha(nova_alpha)
         img.paste(av, (MARGIN_X, header_y), av)
 
-    text_x = MARGIN_X + AVATAR_SIZE + 28
+    text_x = MARGIN_X + AVATAR_SIZE + TEXT_GAP_X
     draw.text((text_x, header_y + 12), PROFILE_NAME, font=f_name, fill=COLOR_NAME)
     draw.text((text_x, header_y + 62), PROFILE_HANDLE, font=f_handle, fill=COLOR_HANDLE)
 
-    caption_y = header_y + AVATAR_SIZE + 50
+    caption_y = header_y + AVATAR_SIZE + GAP_HEADER_CAP
     max_w = CANVAS_W - 2 * MARGIN_X
     line_h = 58
 
@@ -432,9 +477,7 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
     lines = wrap_text(caption, f_caption, CANVAS_W - 2 * MARGIN_X, tmp_draw)
     caption_block_h = len(lines) * 58
 
-    GAP_HEADER_CAP = 50
-    GAP_CAP_VIDEO = 40
-    margem_seg = 80
+    margem_seg = SAFE_MARGIN_Y
     altura_disp = CANVAS_H - 2 * margem_seg
 
     def altura_bloco(ch):
