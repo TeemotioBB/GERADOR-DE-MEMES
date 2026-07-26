@@ -22,13 +22,23 @@ import cv2
 import base64
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
+
+# Limites configuráveis para evitar que uploads gigantes prendam o servidor.
+MAX_VIDEO_UPLOAD_MB = int(os.environ.get("MAX_VIDEO_UPLOAD_MB", "200"))
+MAX_LEGENDA_BODY_MB = int(os.environ.get("MAX_LEGENDA_BODY_MB", "15"))
+MAX_VIDEO_UPLOAD_BYTES = MAX_VIDEO_UPLOAD_MB * 1024 * 1024
+MAX_LEGENDA_BODY_BYTES = MAX_LEGENDA_BODY_MB * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = MAX_VIDEO_UPLOAD_BYTES
 
 WORK_DIR = os.path.join(tempfile.gettempdir(), "gerador_memes")
 os.makedirs(WORK_DIR, exist_ok=True)
 
 RESULTS = {}
 UPLOADS = {}
+
+# O meme_maker altera configurações globais ao trocar de perfil.
+# Este lock impede que duas gerações simultâneas misturem os perfis.
+GERACAO_LOCK = threading.Lock()
 
 # A chave fica somente no servidor/Railway e nunca é enviada ao navegador.
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "").strip()
@@ -51,8 +61,30 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"})
+
+
+@app.errorhandler(413)
+def arquivo_grande(_erro):
+    return jsonify({
+        "erro": f"Arquivo muito grande. O limite atual é {MAX_VIDEO_UPLOAD_MB} MB."
+    }), 413
+
+
+def _corpo_maior_que(limite_bytes):
+    tamanho = request.content_length
+    return tamanho is not None and tamanho > limite_bytes
+
+
 @app.route("/detectar", methods=["POST"])
 def detectar():
+    if _corpo_maior_que(MAX_VIDEO_UPLOAD_BYTES):
+        return jsonify({
+            "erro": f"Vídeo muito grande. Envie um arquivo de até {MAX_VIDEO_UPLOAD_MB} MB."
+        }), 413
+
     if "video" not in request.files:
         return jsonify({"erro": "Nenhum video enviado."}), 400
     video = request.files["video"]
@@ -106,6 +138,11 @@ def detectar():
 
 @app.route("/ler-legenda", methods=["POST"])
 def ler_legenda():
+    if _corpo_maior_que(MAX_LEGENDA_BODY_BYTES):
+        return jsonify({
+            "erro": "A imagem enviada para leitura ficou grande demais. Tente novamente."
+        }), 413
+
     if not CLAUDE_API_KEY:
         return jsonify({
             "erro": "A variável CLAUDE_API_KEY não está configurada no Railway."
@@ -113,6 +150,10 @@ def ler_legenda():
 
     dados = request.get_json(silent=True) or {}
     imagem_b64 = (dados.get("imagem") or "").strip()
+    # Aceita tanto base64 puro quanto data:image/png;base64,...
+    if imagem_b64.startswith("data:image/") and "," in imagem_b64:
+        imagem_b64 = imagem_b64.split(",", 1)[1].strip()
+
     if not imagem_b64:
         return jsonify({"erro": "Nenhuma imagem foi enviada para leitura."}), 400
 
@@ -216,11 +257,20 @@ def gerar():
     saida = os.path.join(WORK_DIR, f"{job_id}_post.mp4")
 
     try:
-        if crop and all(k in crop for k in ("x", "y", "w", "h")):
-            regiao = (crop["x"], crop["y"], crop["w"], crop["h"])
-            meme_maker.make_post_from_crop(entrada, legenda, saida, regiao, perfil=perfil, uniqueness=uniqueness)
-        else:
-            meme_maker.make_post(entrada, legenda, saida, perfil=perfil, uniqueness=uniqueness)
+        # Gerações ficam em fila para impedir mistura de configurações entre perfis.
+        # As demais rotas continuam atendendo graças ao worker gthread do Procfile.
+        with GERACAO_LOCK:
+            if crop and all(k in crop for k in ("x", "y", "w", "h")):
+                regiao = (crop["x"], crop["y"], crop["w"], crop["h"])
+                meme_maker.make_post_from_crop(
+                    entrada, legenda, saida, regiao,
+                    perfil=perfil, uniqueness=uniqueness
+                )
+            else:
+                meme_maker.make_post(
+                    entrada, legenda, saida,
+                    perfil=perfil, uniqueness=uniqueness
+                )
     except Exception as e:
         return jsonify({"erro": f"Falha ao gerar: {e}"}), 500
 
