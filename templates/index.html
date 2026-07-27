@@ -363,47 +363,51 @@
     );
   }
 
-  async function enviarUpload(it){
-    const fd = new FormData();
-    fd.append('video', it.file);
+  async function analisar(it){
+    if (!itens.some(item => item.localId === it.localId)) return;
 
-    it.estado = 'enviando';
     it.msgErro = '';
-    render();
+    it.msgErroLegenda = '';
 
-    const j = await respostaJson('/upload', {
-      method: 'POST',
-      body: fd
-    }, 240000);
-
-    it.jobId = j.id;
-  }
-
-  async function detectarComTentativas(it){
     let ultimoErro = null;
 
     for (let tentativa = 1; tentativa <= 3; tentativa++){
+      if (!itens.some(item => item.localId === it.localId)) return;
+
+      const fd = new FormData();
+      fd.append('video', it.file);
+
       try {
         it.estado = tentativa === 1 ? 'analisando' : 'reconectando';
         render();
 
-        return await respostaJson('/detectar', {
+        // Envia o vídeo diretamente para a rota que já foi confirmada
+        // funcionando nos logs do Railway.
+        const j = await respostaJson('/detectar', {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({id: it.jobId})
-        }, 150000);
+          body: fd
+        }, 240000);
 
-      } catch (err){
+        if (!itens.some(item => item.localId === it.localId)) return;
+
+        it.jobId = j.id;
+        it.vw = j.largura;
+        it.vh = j.altura;
+        it.frame = j.frame;
+        it.box = j.box;
+        it.conf = j.confianca;
+        it.estado = j.confianca >= 0.6 ? 'auto' : 'conferir';
+        render();
+
+        if (it.frame) await lerLegenda(it);
+        return;
+
+      } catch(err){
         ultimoErro = err;
 
-        // O worker pode ter reiniciado e perdido o dicionário em memória.
-        // O servidor tenta achar o arquivo no disco; se não encontrar, envia
-        // novamente sem obrigar o usuário a selecionar o vídeo outra vez.
-        if (err.codigo === 'upload_ausente' && it.file){
-          it.jobId = null;
-          await enviarUpload(it);
-        } else if (!erroDeConexao(err) && !(err.status >= 500)){
-          throw err;
+        // Erros de validação não melhoram com nova tentativa.
+        if (!erroDeConexao(err) && !(err.status >= 500)){
+          break;
         }
 
         if (tentativa < 3){
@@ -414,49 +418,19 @@
       }
     }
 
-    throw ultimoErro || new Error('Não foi possível concluir a análise.');
-  }
-
-  async function analisar(it){
     if (!itens.some(item => item.localId === it.localId)) return;
 
-    it.msgErro = '';
-    it.msgErroLegenda = '';
-    render();
+    it.estado = 'erro_analise';
+    const err = ultimoErro || new Error('Não foi possível concluir a análise.');
 
-    try {
-      if (!it.jobId) await enviarUpload(it);
-      if (!itens.some(item => item.localId === it.localId)) return;
-
-      const j = await detectarComTentativas(it);
-      if (!itens.some(item => item.localId === it.localId)) return;
-
-      it.jobId = j.id;
-      it.vw = j.largura;
-      it.vh = j.altura;
-      it.frame = j.frame;
-      it.box = j.box;
-      it.conf = j.confianca;
-      it.estado = j.confianca >= 0.6 ? 'auto' : 'conferir';
-      render();
-
-      // Mantém tudo realmente em sequência: upload, análise e leitura.
-      // Assim o próximo vídeo só começa quando este terminou por completo.
-      if (it.frame) await lerLegenda(it);
-
-    } catch(err){
-      if (!itens.some(item => item.localId === it.localId)) return;
-
-      it.estado = 'erro_analise';
-      if (err.name === 'AbortError'){
-        it.msgErro = 'O envio ou a análise excedeu o tempo limite.';
-      } else if (erroDeConexao(err)){
-        it.msgErro = 'A conexão caiu mesmo após 3 tentativas. Toque em “Tentar novamente”.';
-      } else {
-        it.msgErro = err.message || 'Falha ao analisar o vídeo.';
-      }
-      render();
+    if (err.name === 'AbortError'){
+      it.msgErro = 'O envio ou a análise excedeu o tempo limite.';
+    } else if (erroDeConexao(err)){
+      it.msgErro = 'A conexão caiu mesmo após 3 tentativas. Toque em “Tentar novamente”.';
+    } else {
+      it.msgErro = err.message || 'Falha ao analisar o vídeo.';
     }
+    render();
   }
 
   async function lerLegenda(it){
