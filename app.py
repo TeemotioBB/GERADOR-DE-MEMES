@@ -40,6 +40,11 @@ UPLOADS = {}
 # Este lock impede que duas gerações simultâneas misturem os perfis.
 GERACAO_LOCK = threading.Lock()
 
+# Evita que vários uploads executem FFmpeg/OpenCV ao mesmo tempo e estourem
+# a memória do Railway. A interface também usa fila, mas este lock protege
+# o servidor caso existam duas abas ou dois usuários simultâneos.
+ANALISE_LOCK = threading.Lock()
+
 # A chave fica somente no servidor/Railway e nunca é enviada ao navegador.
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "").strip()
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001").strip()
@@ -87,6 +92,7 @@ def detectar():
 
     if "video" not in request.files:
         return jsonify({"erro": "Nenhum video enviado."}), 400
+
     video = request.files["video"]
     if video.filename == "":
         return jsonify({"erro": "Nenhum video selecionado."}), 400
@@ -94,29 +100,61 @@ def detectar():
     job_id = uuid.uuid4().hex
     nome_seguro = secure_filename(video.filename) or "video.mp4"
     entrada = os.path.join(WORK_DIR, f"{job_id}_in_{nome_seguro}")
+    frame_path = os.path.join(WORK_DIR, f"{job_id}_frame.jpg")
     video.save(entrada)
 
     try:
-        vw, vh = meme_maker.get_video_size(entrada)
-        dur = meme_maker.get_duration(entrada)
-        frame_path = os.path.join(WORK_DIR, f"{job_id}_frame.png")
-        
-        meme_maker.run([
-            "ffmpeg", "-y", "-ss", f"{dur/2:.2f}", "-i", entrada,
-            "-frames:v", "1", "-update", "1", frame_path
-        ])
-        
-        img = cv2.imread(frame_path)
-        box = detector.detectar_card(img)
-        conf = detector.confianca(img, box)
-        
-        if box is None:
-            box = (int(vw * 0.08), int(vh * 0.30), int(vw * 0.84), int(vw * 0.84))
-            conf = 0.0
-            
-        with open(frame_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode()
-        os.remove(frame_path)
+        # FFmpeg e OpenCV podem consumir bastante memória. Executar uma análise
+        # por vez evita que o Railway derrube o processo e o Safari mostre
+        # apenas "Load failed".
+        with ANALISE_LOCK:
+            vw, vh = meme_maker.get_video_size(entrada)
+            dur = meme_maker.get_duration(entrada)
+
+            # O frame de prévia não precisa ter a resolução completa do vídeo.
+            # JPEG de até 720 px reduz muito o uso de RAM e o tamanho da resposta.
+            meme_maker.run([
+                "ffmpeg", "-y",
+                "-ss", f"{max(0.0, dur / 2):.2f}",
+                "-i", entrada,
+                "-frames:v", "1",
+                "-vf", "scale=720:-2:force_original_aspect_ratio=decrease",
+                "-q:v", "4",
+                frame_path,
+            ])
+
+            img = cv2.imread(frame_path)
+            if img is None:
+                raise RuntimeError("O FFmpeg não conseguiu criar o frame de análise.")
+
+            frame_h, frame_w = img.shape[:2]
+            box_frame = detector.detectar_card(img)
+            conf = detector.confianca(img, box_frame)
+
+            if box_frame is None:
+                box = (
+                    int(vw * 0.08),
+                    int(vh * 0.30),
+                    int(vw * 0.84),
+                    int(vw * 0.84),
+                )
+                conf = 0.0
+            else:
+                # O detector trabalhou no JPEG reduzido. Converte o resultado
+                # novamente para as coordenadas do vídeo original.
+                escala_x = vw / frame_w
+                escala_y = vh / frame_h
+                x, y, bw, bh = box_frame
+                box = (
+                    int(round(x * escala_x)),
+                    int(round(y * escala_y)),
+                    int(round(bw * escala_x)),
+                    int(round(bh * escala_y)),
+                )
+
+            with open(frame_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("ascii")
+
     except Exception as e:
         try:
             os.remove(entrada)
@@ -124,15 +162,22 @@ def detectar():
             pass
         return jsonify({"erro": f"Falha ao analisar: {e}"}), 500
 
+    finally:
+        try:
+            os.remove(frame_path)
+        except OSError:
+            pass
+
     UPLOADS[job_id] = {"path": entrada, "nome": nome_seguro}
     _limpar_depois([entrada])
 
     return jsonify({
         "id": job_id,
-        "largura": vw, "altura": vh,
+        "largura": vw,
+        "altura": vh,
         "box": {"x": box[0], "y": box[1], "w": box[2], "h": box[3]},
         "confianca": conf,
-        "frame": "data:image/png;base64," + b64,
+        "frame": "data:image/jpeg;base64," + b64,
     })
 
 
