@@ -386,7 +386,7 @@
         const j = await respostaJson('/detectar', {
           method: 'POST',
           body: fd
-        }, 240000);
+        }, 130000);
 
         if (!itens.some(item => item.localId === it.localId)) return;
 
@@ -399,7 +399,8 @@
         it.estado = j.confianca >= 0.6 ? 'auto' : 'conferir';
         render();
 
-        if (it.frame) await lerLegenda(it);
+        // Libera imediatamente a fila; a legenda é lida em paralelo.
+        if (it.frame) lerLegenda(it);
         return;
 
       } catch(err){
