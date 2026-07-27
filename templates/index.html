@@ -310,11 +310,17 @@
 
     // Acrescenta os vídeos à mesma fila, inclusive quando o usuário adiciona
     // um novo lote enquanto o anterior ainda está sendo analisado.
-    for (const it of novos){
-      filaAnalise = filaAnalise
-        .then(() => analisar(it))
-        .catch(() => {});
-    }
+    for (const it of novos) enfileirarAnalise(it);
+  }
+
+  function enfileirarAnalise(it){
+    filaAnalise = filaAnalise
+      .then(() => analisar(it))
+      .catch(() => {});
+  }
+
+  function esperar(ms){
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   async function respostaJson(url, opcoes, timeoutMs = 180000){
@@ -330,12 +336,18 @@
         try {
           dados = JSON.parse(texto);
         } catch {
-          throw new Error(`O servidor respondeu com erro HTTP ${resp.status}.`);
+          const erro = new Error(`O servidor respondeu com erro HTTP ${resp.status}.`);
+          erro.status = resp.status;
+          throw erro;
         }
       }
 
       if (!resp.ok){
-        throw new Error(dados.erro || `Erro HTTP ${resp.status}.`);
+        const erro = new Error(dados.erro || `Erro HTTP ${resp.status}.`);
+        erro.status = resp.status;
+        erro.codigo = dados.codigo || '';
+        erro.dados = dados;
+        throw erro;
       }
       return dados;
     } finally {
@@ -343,24 +355,80 @@
     }
   }
 
-  async function analisar(it){
-    // O item pode ter sido removido enquanto aguardava na fila.
-    if (!itens.some(item => item.localId === it.localId)) return;
+  function erroDeConexao(err){
+    return err && (
+      err.name === 'AbortError' ||
+      /load failed|failed to fetch|networkerror|network request failed/i.test(err.message || '') ||
+      [502, 503, 504].includes(err.status)
+    );
+  }
 
-    it.estado = 'analisando';
-    it.msgErro = '';
-    render();
-
+  async function enviarUpload(it){
     const fd = new FormData();
     fd.append('video', it.file);
 
-    try {
-      const j = await respostaJson('/detectar', {
-        method: 'POST',
-        body: fd
-      });
+    it.estado = 'enviando';
+    it.msgErro = '';
+    render();
 
-      // Confere novamente, pois o usuário pode remover o item durante o upload.
+    const j = await respostaJson('/upload', {
+      method: 'POST',
+      body: fd
+    }, 240000);
+
+    it.jobId = j.id;
+  }
+
+  async function detectarComTentativas(it){
+    let ultimoErro = null;
+
+    for (let tentativa = 1; tentativa <= 3; tentativa++){
+      try {
+        it.estado = tentativa === 1 ? 'analisando' : 'reconectando';
+        render();
+
+        return await respostaJson('/detectar', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({id: it.jobId})
+        }, 150000);
+
+      } catch (err){
+        ultimoErro = err;
+
+        // O worker pode ter reiniciado e perdido o dicionário em memória.
+        // O servidor tenta achar o arquivo no disco; se não encontrar, envia
+        // novamente sem obrigar o usuário a selecionar o vídeo outra vez.
+        if (err.codigo === 'upload_ausente' && it.file){
+          it.jobId = null;
+          await enviarUpload(it);
+        } else if (!erroDeConexao(err) && !(err.status >= 500)){
+          throw err;
+        }
+
+        if (tentativa < 3){
+          it.estado = 'reconectando';
+          render();
+          await esperar(2500 * tentativa);
+        }
+      }
+    }
+
+    throw ultimoErro || new Error('Não foi possível concluir a análise.');
+  }
+
+  async function analisar(it){
+    if (!itens.some(item => item.localId === it.localId)) return;
+
+    it.msgErro = '';
+    it.msgErroLegenda = '';
+    render();
+
+    try {
+      if (!it.jobId) await enviarUpload(it);
+      if (!itens.some(item => item.localId === it.localId)) return;
+
+      const j = await detectarComTentativas(it);
       if (!itens.some(item => item.localId === it.localId)) return;
 
       it.jobId = j.id;
@@ -372,19 +440,18 @@
       it.estado = j.confianca >= 0.6 ? 'auto' : 'conferir';
       render();
 
-      // A leitura da legenda pode acontecer depois da análise sem bloquear
-      // a próxima prévia da fila.
-      if (it.frame) lerLegenda(it);
+      // Mantém tudo realmente em sequência: upload, análise e leitura.
+      // Assim o próximo vídeo só começa quando este terminou por completo.
+      if (it.frame) await lerLegenda(it);
 
     } catch(err){
       if (!itens.some(item => item.localId === it.localId)) return;
 
       it.estado = 'erro_analise';
-
       if (err.name === 'AbortError'){
-        it.msgErro = 'A análise ultrapassou 3 minutos. Tente novamente com um vídeo menor.';
-      } else if (/load failed|failed to fetch|networkerror/i.test(err.message || '')){
-        it.msgErro = 'A conexão com o Railway caiu durante a análise. Atualize a página e tente novamente.';
+        it.msgErro = 'O envio ou a análise excedeu o tempo limite.';
+      } else if (erroDeConexao(err)){
+        it.msgErro = 'A conexão caiu mesmo após 3 tentativas. Toque em “Tentar novamente”.';
       } else {
         it.msgErro = err.message || 'Falha ao analisar o vídeo.';
       }
@@ -405,19 +472,23 @@
       const faixaH = Math.round(it.box.y * scaleY);
       if (faixaH < 20) return;
 
+      const maxW = 640;
+      const fator = Math.min(1, maxW / imgEl.naturalWidth);
       const canvas = document.createElement('canvas');
-      canvas.width = imgEl.naturalWidth;
-      canvas.height = faixaH;
-      canvas.getContext('2d').drawImage(imgEl, 0, 0);
-      const b64 = canvas.toDataURL('image/png').split(',')[1];
+      canvas.width = Math.max(1, Math.round(imgEl.naturalWidth * fator));
+      canvas.height = Math.max(1, Math.round(faixaH * fator));
+      canvas.getContext('2d').drawImage(
+        imgEl,
+        0, 0, imgEl.naturalWidth, faixaH,
+        0, 0, canvas.width, canvas.height
+      );
+      const b64 = canvas.toDataURL('image/jpeg', 0.78).split(',')[1];
 
-      const resp = await fetch('/ler-legenda', {
+      const j = await respostaJson('/ler-legenda', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imagem: b64 })
-      });
-      const j = await resp.json();
-      if (!resp.ok) throw new Error(j.erro || 'Falha ao ler a legenda.');
+        body: JSON.stringify({ imagem: b64, media_type: 'image/jpeg' })
+      }, 60000);
 
       const texto = (j.texto || '').trim();
       if (texto){
@@ -425,7 +496,7 @@
         render();
       }
     } catch(e) {
-      it.msgErro = e.message || 'Falha ao ler a legenda com o Claude.';
+      it.msgErroLegenda = e.message || 'Falha ao ler a legenda com o Claude.';
       render();
     }
   }
@@ -446,7 +517,9 @@
     div.className = 'item';
 
     const badges = {
+      enviando:   ['analisando', '⬆ enviando...'],
       analisando: ['analisando', '⏳ analisando...'],
+      reconectando:['analisando','↻ reconectando...'],
       auto:       ['auto',       '✓ recorte automático'],
       conferir:   ['conferir',   '⚠ confira o recorte'],
       processando:['processando','⏳ gerando...'],
@@ -499,8 +572,10 @@
     dica.className = 'dica' + ((it.estado==='erro'||it.estado==='erro_analise') ? ' erro-txt' : '');
     dica.textContent =
       (it.estado==='erro'||it.estado==='erro_analise') && it.msgErro ? '⚠ ' + it.msgErro :
-      it.estado==='conferir' ? 'Recorte incerto — ajuste a caixa azul se precisar.' :
-      it.estado==='auto'     ? 'Recorte detectado. Ajuste se quiser.' :
+      it.estado==='conferir' ? (it.msgErroLegenda ? 'Recorte pronto. A legenda automática falhou: ' + it.msgErroLegenda : 'Recorte incerto — ajuste a caixa azul se precisar.') :
+      it.estado==='auto'     ? (it.msgErroLegenda ? 'Recorte pronto. A legenda automática falhou: ' + it.msgErroLegenda : 'Recorte detectado. Ajuste se quiser.') :
+      it.estado==='enviando' ? 'Enviando o vídeo ao Railway...' :
+      it.estado==='reconectando' ? 'A conexão oscilou. Tentando novamente sem perder o upload...' :
       it.estado==='analisando' ? 'Analisando o vídeo...' :
       'Ajuste a caixa azul sobre o vídeo.';
     conteudo.appendChild(dica);
@@ -527,6 +602,19 @@
       btnLer.innerHTML = '📷 Reler legenda';
     });
     conteudo.appendChild(btnLer);
+
+    if (it.estado === 'erro_analise'){
+      const btnTentar = document.createElement('button');
+      btnTentar.className = 'btn-ler';
+      btnTentar.innerHTML = '↻ Tentar novamente';
+      btnTentar.addEventListener('click', () => {
+        it.estado = 'analisando';
+        it.msgErro = '';
+        render();
+        enfileirarAnalise(it);
+      });
+      conteudo.appendChild(btnTentar);
+    }
 
     // Botão de baixar este vídeo (aparece só quando está pronto)
     if (it.estado === 'ok' && it.jobId){
