@@ -263,6 +263,10 @@
   let itens = [];
   let proximoId = 1;
 
+  // Uma única análise por vez. Antes, todos os vídeos eram enviados ao
+  // Railway simultaneamente, o que podia derrubar o servidor por memória.
+  let filaAnalise = Promise.resolve();
+
   // Atualiza o subtítulo conforme o perfil escolhido
   const seletorPerfil = document.getElementById('seletorPerfil');
   const subHeader = document.getElementById('subHeader');
@@ -282,35 +286,110 @@
   dropzone.addEventListener('drop', e => adicionar(e.dataTransfer.files));
 
   function adicionar(fileList){
+    const novos = [];
+    const limiteBytes = 200 * 1024 * 1024;
+
     for (const f of fileList){
       if (!f.type.startsWith('video/')) continue;
+
+      if (f.size > limiteBytes){
+        alert(`O arquivo "${f.name}" ultrapassa o limite de 200 MB.`);
+        continue;
+      }
+
       const it = {
         localId: proximoId++, file: f, nome: f.name,
         estado: 'analisando', jobId: null, legenda: '',
         vw: 0, vh: 0, frame: null, box: null, conf: 0
       };
       itens.push(it);
-      analisar(it);
+      novos.push(it);
     }
+
     render();
+
+    // Acrescenta os vídeos à mesma fila, inclusive quando o usuário adiciona
+    // um novo lote enquanto o anterior ainda está sendo analisado.
+    for (const it of novos){
+      filaAnalise = filaAnalise
+        .then(() => analisar(it))
+        .catch(() => {});
+    }
+  }
+
+  async function respostaJson(url, opcoes, timeoutMs = 180000){
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const resp = await fetch(url, {...opcoes, signal: controller.signal});
+      const texto = await resp.text();
+
+      let dados = {};
+      if (texto){
+        try {
+          dados = JSON.parse(texto);
+        } catch {
+          throw new Error(`O servidor respondeu com erro HTTP ${resp.status}.`);
+        }
+      }
+
+      if (!resp.ok){
+        throw new Error(dados.erro || `Erro HTTP ${resp.status}.`);
+      }
+      return dados;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async function analisar(it){
+    // O item pode ter sido removido enquanto aguardava na fila.
+    if (!itens.some(item => item.localId === it.localId)) return;
+
+    it.estado = 'analisando';
+    it.msgErro = '';
+    render();
+
     const fd = new FormData();
     fd.append('video', it.file);
+
     try {
-      const resp = await fetch('/detectar', { method:'POST', body:fd });
-      const j = await resp.json();
-      if (!resp.ok) throw new Error(j.erro || 'erro');
-      it.jobId = j.id; it.vw = j.largura; it.vh = j.altura;
-      it.frame = j.frame; it.box = j.box; it.conf = j.confianca;
+      const j = await respostaJson('/detectar', {
+        method: 'POST',
+        body: fd
+      });
+
+      // Confere novamente, pois o usuário pode remover o item durante o upload.
+      if (!itens.some(item => item.localId === it.localId)) return;
+
+      it.jobId = j.id;
+      it.vw = j.largura;
+      it.vh = j.altura;
+      it.frame = j.frame;
+      it.box = j.box;
+      it.conf = j.confianca;
       it.estado = j.confianca >= 0.6 ? 'auto' : 'conferir';
+      render();
+
+      // A leitura da legenda pode acontecer depois da análise sem bloquear
+      // a próxima prévia da fila.
       if (it.frame) lerLegenda(it);
+
     } catch(err){
+      if (!itens.some(item => item.localId === it.localId)) return;
+
       it.estado = 'erro_analise';
-      it.msgErro = err.message;
+
+      if (err.name === 'AbortError'){
+        it.msgErro = 'A análise ultrapassou 3 minutos. Tente novamente com um vídeo menor.';
+      } else if (/load failed|failed to fetch|networkerror/i.test(err.message || '')){
+        it.msgErro = 'A conexão com o Railway caiu durante a análise. Atualize a página e tente novamente.';
+      } else {
+        it.msgErro = err.message || 'Falha ao analisar o vídeo.';
+      }
+      render();
     }
-    render();
   }
 
   async function lerLegenda(it){
