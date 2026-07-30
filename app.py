@@ -195,12 +195,40 @@ def ler_legenda():
 
     dados = request.get_json(silent=True) or {}
     imagem_b64 = (dados.get("imagem") or "").strip()
-    # Aceita tanto base64 puro quanto data:image/png;base64,...
+
+    # Se vier no formato data:image/xxx;base64,..., usa o tipo declarado ali
+    # (é o que o navegador realmente gerou) e separa só a parte em base64.
+    media_type_declarado = None
     if imagem_b64.startswith("data:image/") and "," in imagem_b64:
-        imagem_b64 = imagem_b64.split(",", 1)[1].strip()
+        cabecalho, imagem_b64 = imagem_b64.split(",", 1)
+        imagem_b64 = imagem_b64.strip()
+        # cabecalho é algo como "data:image/jpeg;base64"
+        media_type_declarado = cabecalho[len("data:"):].split(";")[0].strip()
 
     if not imagem_b64:
         return jsonify({"erro": "Nenhuma imagem foi enviada para leitura."}), 400
+
+    # A Claude API valida o media_type contra os bytes reais da imagem, então
+    # não basta confiar no que veio do cliente: conferimos a assinatura
+    # (magic bytes) do arquivo decodificado e usamos o tipo verdadeiro.
+    try:
+        cabecalho_bytes = base64.b64decode(imagem_b64[:64] + "==")
+    except Exception:
+        cabecalho_bytes = b""
+
+    if cabecalho_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        media_type = "image/png"
+    elif cabecalho_bytes.startswith(b"\xff\xd8\xff"):
+        media_type = "image/jpeg"
+    elif cabecalho_bytes.startswith(b"GIF87a") or cabecalho_bytes.startswith(b"GIF89a"):
+        media_type = "image/gif"
+    elif cabecalho_bytes[:4] == b"RIFF" and cabecalho_bytes[8:12] == b"WEBP":
+        media_type = "image/webp"
+    else:
+        # Não deu para identificar pelos bytes; usa o que o navegador disse,
+        # e se nem isso tiver vindo, cai para jpeg (formato mais comum de
+        # captura de frame/canvas).
+        media_type = media_type_declarado or "image/jpeg"
 
     payload = {
         "model": CLAUDE_MODEL,
@@ -212,7 +240,7 @@ def ler_legenda():
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": "image/png",
+                        "media_type": media_type,
                         "data": imagem_b64
                     }
                 },
