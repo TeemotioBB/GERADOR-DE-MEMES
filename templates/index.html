@@ -246,12 +246,15 @@
 
   <div class="card">
     <div class="importar-link">
-      <label for="inputInstagram">🔗 Importar Reels pelo link</label>
+      <label for="inputInstagram">🔗 Importar Reels pelos links</label>
       <div class="importar-linha">
-        <input id="inputInstagram" type="url" inputmode="url"
-               placeholder="https://www.instagram.com/reel/..." autocomplete="off">
-        <button class="btn-importar" id="btnImportar" type="button">Importar</button>
+        <textarea id="inputInstagram" inputmode="url" autocomplete="off"
+          placeholder="Cole até 10 links, um por linha:
+https://www.instagram.com/reel/...
+https://www.instagram.com/reel/..."></textarea>
+        <button class="btn-importar" id="btnImportar" type="button">Importar links</button>
       </div>
+      <div class="importar-ajuda">Até 10 links por vez. Os vídeos são importados em fila para não sobrecarregar o Railway.</div>
       <div class="importar-status" id="statusImportar"></div>
     </div>
 
@@ -314,64 +317,94 @@
   atualizarSub();
 
   btnImportar.addEventListener('click', importarInstagram);
-  inputInstagram.addEventListener('keydown', e => {
-    if (e.key === 'Enter') importarInstagram();
-  });
+
+  function extrairLinksInstagram(texto){
+    const encontrados = texto.match(/https?:\/\/(?:www\.)?instagram\.com\/(?:reel|reels|p)\/[^\s<>"]+/gi) || [];
+    const limpos = encontrados.map(link => link.trim().replace(/[),.;]+$/, ''));
+    return [...new Set(limpos)];
+  }
 
   async function importarInstagram(){
-    const url = inputInstagram.value.trim();
-    if (!url){
-      statusImportar.textContent = 'Cole o link do Reels.';
+    const links = extrairLinksInstagram(inputInstagram.value);
+
+    if (!links.length){
+      statusImportar.textContent = 'Cole pelo menos um link válido do Instagram.';
       statusImportar.className = 'importar-status erro';
       inputInstagram.focus();
       return;
     }
 
-    const it = {
-      localId: proximoId++, file: null, nome: 'Reels do Instagram',
-      estado: 'importando', jobId: null, legenda: '',
-      vw: 0, vh: 0, frame: null, box: null, conf: 0
-    };
-    itens.push(it);
-    render();
+    if (links.length > 10){
+      statusImportar.textContent = `Você colou ${links.length} links. O limite é 10 por vez.`;
+      statusImportar.className = 'importar-status erro';
+      inputInstagram.focus();
+      return;
+    }
 
+    const lote = links.map((url, indice) => {
+      const it = {
+        localId: proximoId++, file: null,
+        nome: `Reels do Instagram ${indice + 1}`, urlInstagram: url,
+        estado: 'importando', jobId: null, legenda: '',
+        vw: 0, vh: 0, frame: null, box: null, conf: 0
+      };
+      itens.push(it);
+      return it;
+    });
+
+    render();
     btnImportar.disabled = true;
     inputInstagram.disabled = true;
-    statusImportar.textContent = 'Baixando e preparando o vídeo...';
     statusImportar.className = 'importar-status';
 
-    try {
-      const j = await respostaJson('/importar-instagram', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({url})
-      }, 180000);
+    let sucessos = 0;
+    let falhas = 0;
 
-      if (!itens.some(item => item.localId === it.localId)) return;
-      it.nome = j.nome || 'reel_instagram.mp4';
-      it.jobId = j.id;
-      it.vw = j.largura;
-      it.vh = j.altura;
-      it.frame = j.frame;
-      it.box = j.box;
-      it.conf = j.confianca;
-      it.estado = j.confianca >= 0.6 ? 'auto' : 'conferir';
-      inputInstagram.value = '';
-      statusImportar.textContent = 'Vídeo importado com sucesso.';
+    for (let i = 0; i < lote.length; i++){
+      const it = lote[i];
+      if (!itens.some(item => item.localId === it.localId)) continue;
+
+      statusImportar.textContent = `Importando ${i + 1}/${lote.length}... (${sucessos} concluído${sucessos === 1 ? '' : 's'})`;
+      it.estado = 'importando';
       render();
-      if (it.frame) lerLegenda(it);
-    } catch(err){
-      it.estado = 'erro_analise';
-      it.msgErro = err.name === 'AbortError'
-        ? 'A importação excedeu o tempo limite.'
-        : (err.message || 'Não foi possível importar o Reels.');
-      statusImportar.textContent = it.msgErro;
-      statusImportar.className = 'importar-status erro';
-      render();
-    } finally {
-      btnImportar.disabled = false;
-      inputInstagram.disabled = false;
+
+      try {
+        const j = await respostaJson('/importar-instagram', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({url: it.urlInstagram})
+        }, 180000);
+
+        if (!itens.some(item => item.localId === it.localId)) continue;
+        it.nome = j.nome || `reel_instagram_${i + 1}.mp4`;
+        it.jobId = j.id;
+        it.vw = j.largura;
+        it.vh = j.altura;
+        it.frame = j.frame;
+        it.box = j.box;
+        it.conf = j.confianca;
+        it.estado = j.confianca >= 0.6 ? 'auto' : 'conferir';
+        sucessos++;
+        render();
+        if (it.frame) lerLegenda(it);
+      } catch(err){
+        falhas++;
+        it.estado = 'erro_analise';
+        it.msgErro = err.name === 'AbortError'
+          ? 'A importação excedeu o tempo limite.'
+          : (err.message || 'Não foi possível importar este Reels.');
+        render();
+      }
     }
+
+    inputInstagram.value = '';
+    statusImportar.textContent = falhas
+      ? `${sucessos} vídeo(s) importado(s) e ${falhas} com erro.`
+      : `${sucessos} vídeo(s) importado(s) com sucesso.`;
+    statusImportar.className = falhas ? 'importar-status erro' : 'importar-status';
+    btnImportar.disabled = false;
+    inputInstagram.disabled = false;
+    inputInstagram.focus();
   }
 
   dropzone.addEventListener('click', () => inputVideo.click());
