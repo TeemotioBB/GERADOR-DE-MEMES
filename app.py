@@ -18,6 +18,7 @@ from werkzeug.utils import secure_filename
 
 import meme_maker
 import detector
+import instagram_import
 import cv2
 import base64
 
@@ -83,36 +84,15 @@ def _corpo_maior_que(limite_bytes):
     return tamanho is not None and tamanho > limite_bytes
 
 
-@app.route("/detectar", methods=["POST"])
-def detectar():
-    if _corpo_maior_que(MAX_VIDEO_UPLOAD_BYTES):
-        return jsonify({
-            "erro": f"Vídeo muito grande. Envie um arquivo de até {MAX_VIDEO_UPLOAD_MB} MB."
-        }), 413
-
-    if "video" not in request.files:
-        return jsonify({"erro": "Nenhum video enviado."}), 400
-
-    video = request.files["video"]
-    if video.filename == "":
-        return jsonify({"erro": "Nenhum video selecionado."}), 400
-
-    job_id = uuid.uuid4().hex
-    nome_seguro = secure_filename(video.filename) or "video.mp4"
-    entrada = os.path.join(WORK_DIR, f"{job_id}_in_{nome_seguro}")
+def _analisar_arquivo(entrada, nome_seguro, job_id):
+    """Executa a análise comum para upload manual e importação por URL."""
     frame_path = os.path.join(WORK_DIR, f"{job_id}_frame.jpg")
-    video.save(entrada)
 
     try:
-        # FFmpeg e OpenCV podem consumir bastante memória. Executar uma análise
-        # por vez evita que o Railway derrube o processo e o Safari mostre
-        # apenas "Load failed".
         with ANALISE_LOCK:
             vw, vh = meme_maker.get_video_size(entrada)
             dur = meme_maker.get_duration(entrada)
 
-            # O frame de prévia não precisa ter a resolução completa do vídeo.
-            # JPEG de até 720 px reduz muito o uso de RAM e o tamanho da resposta.
             meme_maker.run([
                 "ffmpeg", "-y",
                 "-ss", f"{max(0.0, dur / 2):.2f}",
@@ -133,35 +113,21 @@ def detectar():
 
             if box_frame is None:
                 box = (
-                    int(vw * 0.08),
-                    int(vh * 0.30),
-                    int(vw * 0.84),
-                    int(vw * 0.84),
+                    int(vw * 0.08), int(vh * 0.30),
+                    int(vw * 0.84), int(vw * 0.84),
                 )
                 conf = 0.0
             else:
-                # O detector trabalhou no JPEG reduzido. Converte o resultado
-                # novamente para as coordenadas do vídeo original.
                 escala_x = vw / frame_w
                 escala_y = vh / frame_h
                 x, y, bw, bh = box_frame
                 box = (
-                    int(round(x * escala_x)),
-                    int(round(y * escala_y)),
-                    int(round(bw * escala_x)),
-                    int(round(bh * escala_y)),
+                    int(round(x * escala_x)), int(round(y * escala_y)),
+                    int(round(bw * escala_x)), int(round(bh * escala_y)),
                 )
 
             with open(frame_path, "rb") as f:
                 b64 = base64.b64encode(f.read()).decode("ascii")
-
-    except Exception as e:
-        try:
-            os.remove(entrada)
-        except OSError:
-            pass
-        return jsonify({"erro": f"Falha ao analisar: {e}"}), 500
-
     finally:
         try:
             os.remove(frame_path)
@@ -171,14 +137,72 @@ def detectar():
     UPLOADS[job_id] = {"path": entrada, "nome": nome_seguro}
     _limpar_depois([entrada])
 
-    return jsonify({
+    return {
         "id": job_id,
         "largura": vw,
         "altura": vh,
         "box": {"x": box[0], "y": box[1], "w": box[2], "h": box[3]},
         "confianca": conf,
         "frame": "data:image/jpeg;base64," + b64,
-    })
+        "nome": nome_seguro,
+    }
+
+
+@app.route("/detectar", methods=["POST"])
+def detectar():
+    if _corpo_maior_que(MAX_VIDEO_UPLOAD_BYTES):
+        return jsonify({"erro": f"Vídeo muito grande. Envie um arquivo de até {MAX_VIDEO_UPLOAD_MB} MB."}), 413
+    if "video" not in request.files:
+        return jsonify({"erro": "Nenhum video enviado."}), 400
+
+    video = request.files["video"]
+    if video.filename == "":
+        return jsonify({"erro": "Nenhum video selecionado."}), 400
+
+    job_id = uuid.uuid4().hex
+    nome_seguro = secure_filename(video.filename) or "video.mp4"
+    entrada = os.path.join(WORK_DIR, f"{job_id}_in_{nome_seguro}")
+    video.save(entrada)
+
+    try:
+        return jsonify(_analisar_arquivo(entrada, nome_seguro, job_id))
+    except Exception as e:
+        try:
+            os.remove(entrada)
+        except OSError:
+            pass
+        return jsonify({"erro": f"Falha ao analisar: {e}"}), 500
+
+
+@app.route("/importar-instagram", methods=["POST"])
+def importar_instagram():
+    dados = request.get_json(silent=True) or {}
+    url = (dados.get("url") or "").strip()
+    job_id = uuid.uuid4().hex
+    entrada = None
+
+    try:
+        entrada, nome = instagram_import.baixar_video_instagram(
+            url=url,
+            pasta_destino=WORK_DIR,
+            identificador=job_id,
+            limite_mb=MAX_VIDEO_UPLOAD_MB,
+        )
+        return jsonify(_analisar_arquivo(entrada, nome, job_id))
+    except instagram_import.InstagramImportError as e:
+        if entrada:
+            try:
+                os.remove(entrada)
+            except OSError:
+                pass
+        return jsonify({"erro": str(e)}), 400
+    except Exception as e:
+        if entrada:
+            try:
+                os.remove(entrada)
+            except OSError:
+                pass
+        return jsonify({"erro": f"Falha ao importar o Reels: {e}"}), 500
 
 
 @app.route("/ler-legenda", methods=["POST"])
