@@ -19,9 +19,9 @@
   }
 
   /* ---- Header ---- */
-  header{text-align:center;margin-bottom:20px;}
-  header h1{font-size:22px;font-weight:800;letter-spacing:-.3px;}
-  header p{color:var(--cinza);font-size:13px;margin-top:3px;}
+  header{text-align:center;margin-bottom:18px;}
+  header h1{font-size:24px;font-weight:850;letter-spacing:-.5px;}
+  header p{color:var(--cinza);font-size:13px;margin-top:5px;line-height:1.35;}
 
   /* ---- Barra de chave ---- */
   .token-bar{
@@ -47,57 +47,48 @@
 
   /* ---- Barra de perfil ---- */
   .perfil-bar{
-    width:100%;max-width:700px;margin-bottom:16px;
-    display:flex;align-items:center;gap:12px;
+    width:100%;max-width:700px;margin-bottom:12px;
+    display:grid;grid-template-columns:1fr;gap:7px;
     background:var(--branco);border:1px solid var(--borda);
-    border-radius:var(--radius);padding:12px 18px;
-    box-shadow:0 1px 4px rgba(0,0,0,.06);
+    border-radius:var(--radius);padding:14px 16px;
+    box-shadow:0 1px 4px rgba(0,0,0,.05);
   }
-  .perfil-bar label{font-size:14px;font-weight:700;color:var(--tinta);white-space:nowrap;}
+  .perfil-bar label{font-size:12px;font-weight:750;color:var(--cinza);}
   .perfil-bar select{
-    flex:1;border:1px solid var(--borda);border-radius:10px;padding:9px 12px;
-    font-size:14px;font-family:inherit;color:var(--tinta);background:#fafafa;
-    cursor:pointer;transition:.15s border-color;
+    width:100%;border:1px solid var(--borda);border-radius:11px;padding:11px 12px;
+    font-size:15px;font-weight:600;font-family:inherit;color:var(--tinta);background:#fafafa;
+    cursor:pointer;transition:.15s border-color,.15s background;
   }
   .perfil-bar select:focus{outline:none;border-color:var(--azul);background:#fff;}
 
   /* ---- Card principal ---- */
   .card{
     background:var(--branco);width:100%;max-width:700px;
-    border:1px solid var(--borda);border-radius:var(--radius);padding:20px;
-    box-shadow:0 1px 4px rgba(0,0,0,.06);
+    border:1px solid var(--borda);border-radius:var(--radius);padding:18px;
+    box-shadow:0 1px 4px rgba(0,0,0,.05);
   }
 
   /* ---- Importar pelo link ---- */
-  .importar-link{margin-bottom:16px;}
-  .importar-link label{display:block;font-size:14px;font-weight:700;margin-bottom:8px;}
-  .importar-linha{display:flex;gap:8px;}
-  .importar-linha input{
-    flex:1;min-width:0;border:1px solid var(--borda);border-radius:10px;
-    padding:11px 12px;font-size:14px;font-family:inherit;background:#fafafa;
+  .importar-link{margin-bottom:4px;}
+  .importar-cabecalho{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px;}
+  .importar-titulo{font-size:17px;font-weight:800;letter-spacing:-.2px;}
+  .importar-subtitulo{font-size:12px;color:var(--cinza);margin-top:3px;line-height:1.35;}
+  .limite-badge{font-size:11px;font-weight:750;color:var(--azul);background:#eaf6fe;padding:5px 9px;border-radius:999px;white-space:nowrap;}
+  .importar-linha{display:flex;flex-direction:column;gap:10px;}
+  .importar-linha textarea{
+    width:100%;min-height:112px;resize:vertical;border:1px solid var(--borda);border-radius:12px;
+    padding:12px 13px;font-size:14px;font-family:inherit;line-height:1.45;background:#fafafa;
   }
-  .importar-linha input:focus{outline:none;border-color:var(--azul);background:#fff;}
+  .importar-linha textarea:focus{outline:none;border-color:var(--azul);background:#fff;box-shadow:0 0 0 3px rgba(29,155,240,.10);}
   .btn-importar{
-    border:none;border-radius:10px;padding:0 18px;background:var(--azul);color:#fff;
-    font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap;
+    width:100%;border:1.5px solid var(--azul);border-radius:12px;padding:11px 16px;
+    background:#fff;color:var(--azul);font-size:15px;font-weight:800;font-family:inherit;cursor:pointer;
+    transition:.15s background,.15s color;
   }
-  .btn-importar:hover{background:var(--azul-escuro);}
+  .btn-importar:hover{background:#eaf6fe;}
   .btn-importar:disabled{opacity:.55;cursor:not-allowed;}
-  .importar-status{font-size:12px;color:var(--cinza);margin-top:7px;min-height:17px;}
+  .importar-status{font-size:12px;color:var(--cinza);margin-top:9px;min-height:17px;line-height:1.4;}
   .importar-status.erro{color:var(--erro);}
-  .separador{display:flex;align-items:center;gap:10px;color:var(--espera);font-size:12px;margin:14px 0;}
-  .separador::before,.separador::after{content:"";height:1px;background:var(--borda);flex:1;}
-  @media(max-width:560px){.importar-linha{flex-direction:column}.btn-importar{padding:11px 18px}}
-
-  /* ---- Dropzone ---- */
-  .dropzone{
-    border:2px dashed var(--borda);border-radius:12px;padding:28px 18px;
-    text-align:center;color:var(--cinza);cursor:pointer;font-size:14px;
-    transition:.15s border-color,.15s background;
-  }
-  .dropzone:hover,.dropzone.ativo{border-color:var(--azul);background:#f0f8ff;}
-  .dropzone strong{color:var(--azul);}
-  .dropzone .sub{font-size:12px;margin-top:4px;display:block;}
 
   /* ---- Lista de itens ---- */
   .lista{margin-top:16px;display:flex;flex-direction:column;gap:14px;}
@@ -204,12 +195,14 @@
   .resumo.mostrar{display:block;}
 
   /* ---- Ações ---- */
-  .acoes{display:flex;gap:10px;margin-top:18px;}
+  .acoes{display:flex;flex-direction:column;gap:9px;margin-top:18px;}
   .btn{
-    flex:1;padding:13px;border-radius:999px;font-size:15px;font-weight:700;
+    width:100%;padding:13px;border-radius:12px;font-size:15px;font-weight:750;
     cursor:pointer;border:1.5px solid var(--borda);background:#fff;
     color:var(--tinta);font-family:inherit;transition:.15s background,.15s border-color;
   }
+  #btnGerar{order:1;}
+  #btnLimpar{order:2;background:transparent;border-color:transparent;color:var(--cinza);padding:10px;}
   .btn:hover{background:#f7f9f9;}
   .btn.azul{background:var(--azul);color:#fff;border-color:var(--azul);}
   .btn.azul:hover{background:var(--azul-escuro);border-color:var(--azul-escuro);}
@@ -225,7 +218,23 @@
   .download-zip.mostrar{display:block;}
 
   /* ---- Footer ---- */
-  footer{margin-top:24px;color:var(--cinza);font-size:12px;text-align:center;max-width:600px;line-height:1.6;}
+  footer{margin-top:20px;color:var(--cinza);font-size:12px;text-align:center;max-width:600px;line-height:1.6;}
+
+  @media(max-width:560px){
+    body{padding:18px 14px 72px;}
+    header{margin-bottom:15px;}
+    header h1{font-size:23px;}
+    .perfil-bar{padding:13px 14px;}
+    .card{padding:16px 14px;}
+    .importar-cabecalho{margin-bottom:10px;}
+    .importar-titulo{font-size:16px;}
+    .importar-linha textarea{min-height:104px;font-size:16px;}
+    .vazio{padding:18px 0 8px;}
+    .corpo{flex-direction:column;}
+    .recorte-area,.recorte-ph{width:100%;}
+    .recorte-ph{height:280px;}
+    .acoes{position:sticky;bottom:10px;background:rgba(255,255,255,.94);padding-top:8px;z-index:8;backdrop-filter:blur(8px);}
+  }
 </style>
 </head>
 <body>
@@ -236,7 +245,7 @@
   </header>
 
   <div class="perfil-bar">
-    <label>📄 Postar como:</label>
+    <label for="seletorPerfil">👤 PERFIL</label>
     <select id="seletorPerfil">
       <option value="adultosofrido">Adulto Sofrido (@adultosofrido)</option>
       <option value="achadinhosofcs">achadinhosofcs (@achadinhosofcs)</option>
@@ -246,28 +255,25 @@
 
   <div class="card">
     <div class="importar-link">
-      <label for="inputInstagram">🔗 Importar Reels pelos links</label>
+      <div class="importar-cabecalho">
+        <div>
+          <div class="importar-titulo">🔗 Importar Reels</div>
+          <div class="importar-subtitulo">Cole um link por linha. A importação acontece em fila.</div>
+        </div>
+        <span class="limite-badge">até 10</span>
+      </div>
       <div class="importar-linha">
         <textarea id="inputInstagram" inputmode="url" autocomplete="off"
-          placeholder="Cole até 10 links, um por linha:
-https://www.instagram.com/reel/...
+          aria-label="Links dos Reels"
+          placeholder="https://www.instagram.com/reel/...
 https://www.instagram.com/reel/..."></textarea>
-        <button class="btn-importar" id="btnImportar" type="button">Importar links</button>
+        <button class="btn-importar" id="btnImportar" type="button">Importar Reels</button>
       </div>
-      <div class="importar-ajuda">Até 10 links por vez. Os vídeos são importados em fila para não sobrecarregar o Railway.</div>
       <div class="importar-status" id="statusImportar"></div>
     </div>
 
-    <div class="separador">ou envie o arquivo</div>
-
-    <div class="dropzone" id="dropzone">
-      <div>📁 Arraste os reels aqui ou <strong>clique para escolher</strong></div>
-      <span class="sub">pode adicionar vários de uma vez</span>
-    </div>
-    <input type="file" id="inputVideo" accept="video/*" multiple hidden>
-
     <div class="lista" id="lista"></div>
-    <div class="vazio" id="vazio">Nenhum reel adicionado ainda.</div>
+    <div class="vazio" id="vazio">Nenhum Reels importado ainda.</div>
 
     <div class="barra-geral" id="barraGeral"><div class="preenche" id="preenche"></div></div>
     <div class="resumo" id="resumo"></div>
@@ -280,13 +286,10 @@ https://www.instagram.com/reel/..."></textarea>
   </div>
 
   <footer>
-    A caixa azul mostra o recorte detectado automaticamente.<br>
-    Arraste ou puxe os cantos para ajustar. Tudo roda no seu computador.
+    Revise o recorte e a legenda de cada vídeo antes de gerar.
   </footer>
 
 <script>
-  const dropzone   = document.getElementById('dropzone');
-  const inputVideo = document.getElementById('inputVideo');
   const lista      = document.getElementById('lista');
   const vazio      = document.getElementById('vazio');
   const btnGerar   = document.getElementById('btnGerar');
@@ -406,14 +409,6 @@ https://www.instagram.com/reel/..."></textarea>
     inputInstagram.disabled = false;
     inputInstagram.focus();
   }
-
-  dropzone.addEventListener('click', () => inputVideo.click());
-  inputVideo.addEventListener('change', e => { adicionar(e.target.files); inputVideo.value=''; });
-  ['dragover','dragenter'].forEach(ev =>
-    dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.add('ativo'); }));
-  ['dragleave','drop'].forEach(ev =>
-    dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.remove('ativo'); }));
-  dropzone.addEventListener('drop', e => adicionar(e.dataTransfer.files));
 
   function adicionar(fileList){
     const novos = [];
