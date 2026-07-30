@@ -68,6 +68,27 @@
     box-shadow:0 1px 4px rgba(0,0,0,.06);
   }
 
+  /* ---- Importar pelo link ---- */
+  .importar-link{margin-bottom:16px;}
+  .importar-link label{display:block;font-size:14px;font-weight:700;margin-bottom:8px;}
+  .importar-linha{display:flex;gap:8px;}
+  .importar-linha input{
+    flex:1;min-width:0;border:1px solid var(--borda);border-radius:10px;
+    padding:11px 12px;font-size:14px;font-family:inherit;background:#fafafa;
+  }
+  .importar-linha input:focus{outline:none;border-color:var(--azul);background:#fff;}
+  .btn-importar{
+    border:none;border-radius:10px;padding:0 18px;background:var(--azul);color:#fff;
+    font-size:14px;font-weight:700;font-family:inherit;cursor:pointer;white-space:nowrap;
+  }
+  .btn-importar:hover{background:var(--azul-escuro);}
+  .btn-importar:disabled{opacity:.55;cursor:not-allowed;}
+  .importar-status{font-size:12px;color:var(--cinza);margin-top:7px;min-height:17px;}
+  .importar-status.erro{color:var(--erro);}
+  .separador{display:flex;align-items:center;gap:10px;color:var(--espera);font-size:12px;margin:14px 0;}
+  .separador::before,.separador::after{content:"";height:1px;background:var(--borda);flex:1;}
+  @media(max-width:560px){.importar-linha{flex-direction:column}.btn-importar{padding:11px 18px}}
+
   /* ---- Dropzone ---- */
   .dropzone{
     border:2px dashed var(--borda);border-radius:12px;padding:28px 18px;
@@ -224,6 +245,18 @@
   </div>
 
   <div class="card">
+    <div class="importar-link">
+      <label for="inputInstagram">🔗 Importar Reels pelo link</label>
+      <div class="importar-linha">
+        <input id="inputInstagram" type="url" inputmode="url"
+               placeholder="https://www.instagram.com/reel/..." autocomplete="off">
+        <button class="btn-importar" id="btnImportar" type="button">Importar</button>
+      </div>
+      <div class="importar-status" id="statusImportar"></div>
+    </div>
+
+    <div class="separador">ou envie o arquivo</div>
+
     <div class="dropzone" id="dropzone">
       <div>📁 Arraste os reels aqui ou <strong>clique para escolher</strong></div>
       <span class="sub">pode adicionar vários de uma vez</span>
@@ -259,6 +292,9 @@
   const barraGeral = document.getElementById('barraGeral');
   const preenche   = document.getElementById('preenche');
   const resumo     = document.getElementById('resumo');
+  const inputInstagram = document.getElementById('inputInstagram');
+  const btnImportar = document.getElementById('btnImportar');
+  const statusImportar = document.getElementById('statusImportar');
 
   let itens = [];
   let proximoId = 1;
@@ -276,6 +312,67 @@
   }
   seletorPerfil.addEventListener('change', atualizarSub);
   atualizarSub();
+
+  btnImportar.addEventListener('click', importarInstagram);
+  inputInstagram.addEventListener('keydown', e => {
+    if (e.key === 'Enter') importarInstagram();
+  });
+
+  async function importarInstagram(){
+    const url = inputInstagram.value.trim();
+    if (!url){
+      statusImportar.textContent = 'Cole o link do Reels.';
+      statusImportar.className = 'importar-status erro';
+      inputInstagram.focus();
+      return;
+    }
+
+    const it = {
+      localId: proximoId++, file: null, nome: 'Reels do Instagram',
+      estado: 'importando', jobId: null, legenda: '',
+      vw: 0, vh: 0, frame: null, box: null, conf: 0
+    };
+    itens.push(it);
+    render();
+
+    btnImportar.disabled = true;
+    inputInstagram.disabled = true;
+    statusImportar.textContent = 'Baixando e preparando o vídeo...';
+    statusImportar.className = 'importar-status';
+
+    try {
+      const j = await respostaJson('/importar-instagram', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({url})
+      }, 180000);
+
+      if (!itens.some(item => item.localId === it.localId)) return;
+      it.nome = j.nome || 'reel_instagram.mp4';
+      it.jobId = j.id;
+      it.vw = j.largura;
+      it.vh = j.altura;
+      it.frame = j.frame;
+      it.box = j.box;
+      it.conf = j.confianca;
+      it.estado = j.confianca >= 0.6 ? 'auto' : 'conferir';
+      inputInstagram.value = '';
+      statusImportar.textContent = 'Vídeo importado com sucesso.';
+      render();
+      if (it.frame) lerLegenda(it);
+    } catch(err){
+      it.estado = 'erro_analise';
+      it.msgErro = err.name === 'AbortError'
+        ? 'A importação excedeu o tempo limite.'
+        : (err.message || 'Não foi possível importar o Reels.');
+      statusImportar.textContent = it.msgErro;
+      statusImportar.className = 'importar-status erro';
+      render();
+    } finally {
+      btnImportar.disabled = false;
+      inputInstagram.disabled = false;
+    }
+  }
 
   dropzone.addEventListener('click', () => inputVideo.click());
   inputVideo.addEventListener('change', e => { adicionar(e.target.files); inputVideo.value=''; });
@@ -492,6 +589,7 @@
     div.className = 'item';
 
     const badges = {
+      importando: ['analisando', '⬇ importando...'],
       enviando:   ['analisando', '⬆ enviando...'],
       analisando: ['analisando', '⏳ analisando...'],
       reconectando:['analisando','↻ reconectando...'],
@@ -536,7 +634,7 @@
     } else {
       const ph = document.createElement('div');
       ph.className = 'recorte-ph';
-      ph.textContent = it.estado === 'erro_analise' ? '✗ erro' : '⏳';
+      ph.textContent = it.estado === 'erro_analise' ? '✗ erro' : (it.estado === 'importando' ? '⬇' : '⏳');
       corpo.appendChild(ph);
     }
 
@@ -549,6 +647,7 @@
       (it.estado==='erro'||it.estado==='erro_analise') && it.msgErro ? '⚠ ' + it.msgErro :
       it.estado==='conferir' ? (it.msgErroLegenda ? 'Recorte pronto. A legenda automática falhou: ' + it.msgErroLegenda : 'Recorte incerto — ajuste a caixa azul se precisar.') :
       it.estado==='auto'     ? (it.msgErroLegenda ? 'Recorte pronto. A legenda automática falhou: ' + it.msgErroLegenda : 'Recorte detectado. Ajuste se quiser.') :
+      it.estado==='importando' ? 'Baixando o Reels diretamente do Instagram...' :
       it.estado==='enviando' ? 'Enviando o vídeo ao Railway...' :
       it.estado==='reconectando' ? 'A conexão oscilou. Tentando novamente sem perder o upload...' :
       it.estado==='analisando' ? 'Analisando o vídeo...' :
