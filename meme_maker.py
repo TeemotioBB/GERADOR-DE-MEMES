@@ -8,6 +8,7 @@ import sys
 import json
 import subprocess
 import tempfile
+import random
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont, ImageChops
 
@@ -274,7 +275,7 @@ def deep_clean_mp4(input_path, output_path, remove_sei=True):
 
 
 def _normalizar_opcoes_uniqueness(options):
-    """Normaliza opções antigas do navegador e garante qualidade CRF 18 ou melhor."""
+    """Normaliza opções e aplica transformações visuais mais fortes + variação por vídeo."""
     options = dict(options or {})
 
     try:
@@ -285,10 +286,13 @@ def _normalizar_opcoes_uniqueness(options):
     # Um CRF menor significa mais qualidade. Nunca permite voltar para 20/23.
     crf = max(0, min(crf_solicitado, 18))
 
+    # Velocidade: se não veio valor fixo útil, randomiza entre 0.97 e 1.04
     try:
-        speed = float(options.get("speed_factor", 1.01))
+        speed = float(options.get("speed_factor", 0))
     except (TypeError, ValueError):
-        speed = 1.01
+        speed = 0
+    if speed <= 0 or abs(speed - 1.0) < 0.001:
+        speed = round(random.uniform(0.97, 1.04), 4)
     if speed <= 0:
         speed = 1.0
 
@@ -296,6 +300,10 @@ def _normalizar_opcoes_uniqueness(options):
         "light_crop": bool(options.get("light_crop", True)),
         "color_adjust": bool(options.get("color_adjust", True)),
         "subtle_grain": bool(options.get("subtle_grain", True)),
+        "stronger_visuals": bool(options.get("stronger_visuals", True)),
+        "random_flip": bool(options.get("random_flip", True)),
+        "vignette": bool(options.get("vignette", True)),
+        "dynamic_zoom": bool(options.get("dynamic_zoom", True)),
         "speed_factor": speed,
         "crf": crf,
         "preset": str(options.get("preset", "slow") or "slow"),
@@ -505,20 +513,66 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
     )
 
     # Todos os filtros visuais são acumulados aqui e executados uma única vez.
+    # Transformações mais fortes + variação por vídeo para aumentar distância
+    # perceptual do original (sem destruir qualidade).
     video_filters = []
     if crop is not None:
         video_filters.append(f"crop={cw0}:{ch0}:{cx0}:{cy0}")
+
+    # Crop leve extra (remove 1-3% das bordas de forma aleatória)
     if opcoes["light_crop"]:
-        video_filters.append("crop=iw-4:ih-4")
-    if opcoes["color_adjust"]:
-        video_filters.append("eq=brightness=0.012:saturation=1.018:contrast=1.008")
-    if opcoes["subtle_grain"]:
-        video_filters.append("noise=alls=4:allf=t")
+        crop_pct = random.uniform(0.01, 0.03)
+        video_filters.append(
+            f"crop=iw*(1-{crop_pct:.4f}):ih*(1-{crop_pct:.4f})"
+        )
+
+    # Espelhamento horizontal ocasional (~30% dos vídeos)
+    do_flip = False
+    if opcoes.get("random_flip", True) and random.random() < 0.30:
+        video_filters.append("hflip")
+        do_flip = True
+
+    # Color grade mais marcante (varia um pouco por vídeo)
+    if opcoes["color_adjust"] or opcoes.get("stronger_visuals", True):
+        brightness = round(random.uniform(0.02, 0.06), 3)
+        contrast = round(random.uniform(1.03, 1.10), 3)
+        saturation = round(random.uniform(1.05, 1.18), 3)
+        if do_flip:
+            saturation = round(random.uniform(1.08, 1.22), 3)
+        hue_shift = round(random.uniform(-6, 6), 1)
+        video_filters.append(
+            f"eq=brightness={brightness}:contrast={contrast}:saturation={saturation}"
+        )
+        if abs(hue_shift) > 0.5:
+            video_filters.append(f"hue=h={hue_shift}")
+        video_filters.append(
+            "curves=all='0/0 0.25/0.22 0.5/0.52 0.75/0.78 1/1'"
+        )
+
+    # Grão / partículas mais forte
+    if opcoes["subtle_grain"] or opcoes.get("stronger_visuals", True):
+        grain_strength = random.randint(6, 12)
+        video_filters.append(f"noise=alls={grain_strength}:allf=t")
+
+    # Vinheta (escurece as bordas do card)
+    if opcoes.get("vignette", True):
+        video_filters.append(
+            f"vignette=angle=PI/{random.uniform(3.2, 4.8):.2f}:mode=forward"
+        )
+
+    # Zoom / crop dinâmico leve (estático mas variável por vídeo)
+    if opcoes.get("dynamic_zoom", True):
+        zoom = round(random.uniform(1.04, 1.10), 3)
+        video_filters.append(
+            f"scale=iw*{zoom}:ih*{zoom},"
+            f"crop=iw/{zoom}:ih/{zoom}:(iw-ow)/2:(ih-oh)/2"
+        )
 
     speed = opcoes["speed_factor"]
     if abs(speed - 1.0) > 0.001:
         video_filters.append(f"setpts={1.0 / speed:.12f}*PTS")
 
+    # Redimensiona para o card final
     video_filters += [
         f"scale={cw}:{ch}:force_original_aspect_ratio=increase",
         f"crop={cw}:{ch}",
