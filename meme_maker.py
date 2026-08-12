@@ -45,6 +45,9 @@ PERFIS = {
         "nome": "Adulto Sofrido",
         "handle": "@adultosofrido",
         "avatar": os.path.join(_BASE, "avatar.png"),
+        "logo": os.path.join(_BASE, "logo_adultosofrido.png"),
+        "logo_opacity": 0.25,
+        "logo_width": 130,   # largura em pixels dentro do card
     },
     "achadinhosofcs": {
         "nome": "achadinhosofcs",
@@ -84,14 +87,17 @@ CARD_RADIUS = _layout_inicial["card_radius"]
 SAFE_MARGIN_Y = _layout_inicial["safe_margin_y"]
 
 
+PERFIL_ATUAL = PERFIL_PADRAO
+
 def set_perfil(chave):
-    global PROFILE_NAME, PROFILE_HANDLE, AVATAR_PATH
+    global PROFILE_NAME, PROFILE_HANDLE, AVATAR_PATH, PERFIL_ATUAL
     global MARGIN_X, AVATAR_SIZE, TEXT_GAP_X
     global GAP_HEADER_CAP, GAP_CAP_VIDEO, CARD_RADIUS, SAFE_MARGIN_Y
 
     p = PERFIS.get(chave) or PERFIS[PERFIL_PADRAO]
     layout = {**LAYOUT_PADRAO, **p.get("layout", {})}
 
+    PERFIL_ATUAL = chave if chave in PERFIS else PERFIL_PADRAO
     PROFILE_NAME = p["nome"]
     PROFILE_HANDLE = p["handle"]
     AVATAR_PATH = p["avatar"]
@@ -283,10 +289,8 @@ def _normalizar_opcoes_uniqueness(options):
     except (TypeError, ValueError):
         crf_solicitado = 18
 
-    # Um CRF menor significa mais qualidade. Nunca permite voltar para 20/23.
     crf = max(0, min(crf_solicitado, 18))
 
-    # Velocidade: se não veio valor fixo útil, randomiza entre 0.97 e 1.04
     try:
         speed = float(options.get("speed_factor", 0))
     except (TypeError, ValueError):
@@ -513,28 +517,22 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
     )
 
     # Todos os filtros visuais são acumulados aqui e executados uma única vez.
-    # Transformações mais fortes + variação por vídeo para aumentar distância
-    # perceptual do original (sem destruir qualidade).
+    # Transformações mais fortes + variação por vídeo.
     video_filters = []
     if crop is not None:
         video_filters.append(f"crop={cw0}:{ch0}:{cx0}:{cy0}")
 
-    # Crop leve extra (remove 1-3% das bordas de forma aleatória)
     if opcoes["light_crop"]:
         crop_pct = random.uniform(0.01, 0.03)
         video_filters.append(
             f"crop=iw*(1-{crop_pct:.4f}):ih*(1-{crop_pct:.4f})"
         )
 
-
-    # Espelhamento horizontal em 100% dos vídeos
     do_flip = False
-    if opcoes.get("random_flip", True):
+    if opcoes.get("random_flip", True) and random.random() < 1.0:  # 100% dos vídeos
         video_filters.append("hflip")
         do_flip = True
-    
 
-    # Color grade mais marcante (varia um pouco por vídeo)
     if opcoes["color_adjust"] or opcoes.get("stronger_visuals", True):
         brightness = round(random.uniform(0.02, 0.06), 3)
         contrast = round(random.uniform(1.03, 1.10), 3)
@@ -551,18 +549,15 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
             "curves=all='0/0 0.25/0.22 0.5/0.52 0.75/0.78 1/1'"
         )
 
-    # Grão / partículas mais forte
     if opcoes["subtle_grain"] or opcoes.get("stronger_visuals", True):
         grain_strength = random.randint(6, 12)
         video_filters.append(f"noise=alls={grain_strength}:allf=t")
 
-    # Vinheta (escurece as bordas do card)
     if opcoes.get("vignette", True):
         video_filters.append(
             f"vignette=angle=PI/{random.uniform(3.2, 4.8):.2f}:mode=forward"
         )
 
-    # Zoom / crop dinâmico leve (estático mas variável por vídeo)
     if opcoes.get("dynamic_zoom", True):
         zoom = round(random.uniform(1.04, 1.10), 3)
         video_filters.append(
@@ -574,21 +569,73 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
     if abs(speed - 1.0) > 0.001:
         video_filters.append(f"setpts={1.0 / speed:.12f}*PTS")
 
-    # Redimensiona para o card final
     video_filters += [
         f"scale={cw}:{ch}:force_original_aspect_ratio=increase",
         f"crop={cw}:{ch}",
         "setsar=1",
     ]
 
+    # ---- Logo (somente no perfil adultosofrido) ----
+    perfil_cfg = PERFIS.get(PERFIL_ATUAL, {})
+    usar_logo = (
+        PERFIL_ATUAL == "adultosofrido"
+        and perfil_cfg.get("logo")
+        and os.path.exists(perfil_cfg["logo"])
+    )
+    logo_path_temp = None
+    logo_w = 0
+    logo_h = 0
+
     with tempfile.TemporaryDirectory() as td:
         overlay_path = os.path.join(td, "overlay.png")
         encoded_path = os.path.join(td, "post_encoded.mp4")
         overlay.save(overlay_path)
 
+        inputs = ["-i", video_path, "-framerate", "30", "-loop", "1", "-i", overlay_path]
+        # índice 0 = vídeo, 1 = template overlay
+
+        if usar_logo:
+            # Prepara a logo com tamanho e opacidade
+            logo_src = Image.open(perfil_cfg["logo"]).convert("RGBA")
+            target_w = int(perfil_cfg.get("logo_width", 130))
+            ratio = target_w / logo_src.width
+            target_h = max(1, int(logo_src.height * ratio))
+            logo_src = logo_src.resize((target_w, target_h), Image.LANCZOS)
+
+            # Aplica opacidade 25%
+            opacity = float(perfil_cfg.get("logo_opacity", 0.25))
+            alpha = logo_src.split()[3]
+            alpha = alpha.point(lambda p: int(p * opacity))
+            logo_src.putalpha(alpha)
+
+            logo_path_temp = os.path.join(td, "logo.png")
+            logo_src.save(logo_path_temp)
+            logo_w, logo_h = logo_src.size
+            inputs += ["-loop", "1", "-i", logo_path_temp]
+            # índice 2 = logo
+
+        # Monta o filter_complex
+        # [0:v] → filtros → [v]
+        # depois overlay da logo embaixo-esquerda do card (se houver)
+        # depois coloca o card no fundo branco
+        # depois o template por cima
+
         partes = [
             f"color=white:s={CANVAS_W}x{CANVAS_H}:r=30[bgc]",
-            f"[0:v:0]{','.join(video_filters)}[v]",
+            f"[0:v:0]{','.join(video_filters)}[v0]",
+        ]
+
+        if usar_logo:
+            # logo no canto inferior esquerdo do card, com margem de 12px
+            margin = 12
+            partes.append(
+                f"[2:v]format=rgba,scale={logo_w}:{logo_h}[logo];"
+                f"[v0][logo]overlay={margin}:{ch - logo_h - margin}:shortest=1[v]"
+            )
+        else:
+            partes.append("[v0]null[v]")
+
+        partes += [
             f"[bgc][v]overlay={cx}:{cy}:shortest=1[based]",
             "[based][1:v:0]overlay=0:0:shortest=1[outv]",
         ]
@@ -603,8 +650,7 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
 
         cmd = [
             "ffmpeg", "-y",
-            "-i", video_path,
-            "-framerate", "30", "-loop", "1", "-i", overlay_path,
+            *inputs,
             "-filter_complex", filter_complex,
             "-map", "[outv]",
         ]
