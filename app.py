@@ -329,15 +329,19 @@ def gerar():
     crop = dados.get("crop")
     perfil = dados.get("perfil")
 
-    # === NOVAS OPÇÕES DE ANTI-DETECÇÃO ===
+    # === OPÇÕES DE ANTI-DETECÇÃO / UNIQUENESS ===
     uniqueness = dados.get("uniqueness", {})
-    # Configuração padrão focada em qualidade
+    # Configuração padrão com transformações visuais mais fortes + variação por vídeo
     if not uniqueness:
         uniqueness = {
             "light_crop": True,
             "color_adjust": True,
             "subtle_grain": True,
-            "speed_factor": 1.01,
+            "stronger_visuals": True,
+            "random_flip": True,
+            "vignette": True,
+            "dynamic_zoom": True,
+            "speed_factor": 0,          # 0 = randomiza entre 0.97 e 1.04
             "crf": 18,
             "preset": "slow",
             "deep_metadata_clean": True,
