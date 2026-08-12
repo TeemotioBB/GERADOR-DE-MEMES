@@ -526,11 +526,13 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
             f"crop=iw*(1-{crop_pct:.4f}):ih*(1-{crop_pct:.4f})"
         )
 
-    # Espelhamento horizontal ocasional (~30% dos vídeos)
+
+    # Espelhamento horizontal em 100% dos vídeos
     do_flip = False
-    if opcoes.get("random_flip", True) and random.random() < 0.30:
+    if opcoes.get("random_flip", True):
         video_filters.append("hflip")
         do_flip = True
+    
 
     # Color grade mais marcante (varia um pouco por vídeo)
     if opcoes["color_adjust"] or opcoes.get("stronger_visuals", True):
