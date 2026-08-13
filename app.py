@@ -331,9 +331,12 @@ def gerar():
 
     # === OPÇÕES DE ANTI-DETECÇÃO / UNIQUENESS ===
     uniqueness = dados.get("uniqueness", {})
-    # Configuração padrão com transformações visuais mais fortes + variação por vídeo
+    # Padrão: edições extras e logo DESLIGADAS.
+    # A interface pode enviar edicoes_extras=true e/ou usar_logo=true.
     if not uniqueness:
         uniqueness = {
+            "edicoes_extras": False,
+            "usar_logo": False,
             "light_crop": True,
             "color_adjust": True,
             "subtle_grain": True,
@@ -341,7 +344,7 @@ def gerar():
             "random_flip": True,
             "vignette": True,
             "dynamic_zoom": True,
-            "speed_factor": 0,          # 0 = randomiza entre 0.97 e 1.04
+            "speed_factor": 1.0,
             "crf": 18,
             "preset": "slow",
             "deep_metadata_clean": True,
