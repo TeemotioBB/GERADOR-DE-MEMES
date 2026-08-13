@@ -345,6 +345,17 @@
     </select>
   </div>
 
+  <div class="perfil-bar" style="margin-top:-6px;">
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px;font-weight:650;">
+      <input type="checkbox" id="chkEdicoesExtras" style="width:18px;height:18px;accent-color:#3b82f6;">
+      ✨ Edições extras (flip, cor, grão, vinheta, zoom…)
+    </label>
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px;font-weight:650;margin-top:6px;">
+      <input type="checkbox" id="chkUsarLogo" style="width:18px;height:18px;accent-color:#3b82f6;">
+      🏷️ Colocar logomarca do perfil
+    </label>
+  </div>
+
   <div class="card">
     <div class="importar-link">
       <div class="importar-cabecalho">
@@ -904,6 +915,8 @@ https://www.instagram.com/reel/..."></textarea>
     barraGeral.classList.add('mostrar'); resumo.classList.add('mostrar');
 
     const perfilSel = document.getElementById('seletorPerfil').value;
+    const edicoesExtras = document.getElementById('chkEdicoesExtras').checked;
+    const usarLogo = document.getElementById('chkUsarLogo').checked;
     let feitos=0, ok=0, falhas=0; const ids=[];
     for (const it of fila){
       it.estado='processando'; render();
@@ -911,7 +924,16 @@ https://www.instagram.com/reel/..."></textarea>
       try {
         const resp = await fetch('/gerar',{
           method:'POST', headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({id:it.jobId, legenda:it.legenda.trim(), crop:it.box, perfil:perfilSel})
+          body:JSON.stringify({
+            id: it.jobId,
+            legenda: it.legenda.trim(),
+            crop: it.box,
+            perfil: perfilSel,
+            uniqueness: {
+              edicoes_extras: edicoesExtras,
+              usar_logo: usarLogo
+            }
+          })
         });
         const j = await resp.json();
         if (!resp.ok) throw new Error(j.erro||'erro');
