@@ -281,26 +281,46 @@ def deep_clean_mp4(input_path, output_path, remove_sei=True):
 
 
 def _normalizar_opcoes_uniqueness(options):
-    """Normaliza opções e aplica transformações visuais mais fortes + variação por vídeo."""
+    """Normaliza opções de uniqueness.
+
+    Chaves principais (desligadas por padrão):
+    - edicoes_extras: ativa flip, cor, grão, vinheta, zoom, crop aleatório e velocidade aleatória
+    - usar_logo: ativa a logomarca do perfil atual
+    """
     options = dict(options or {})
 
     try:
         crf_solicitado = int(options.get("crf", 18))
     except (TypeError, ValueError):
         crf_solicitado = 18
-
     crf = max(0, min(crf_solicitado, 18))
 
+    # Chave mestre das edições extras (OFF por padrão)
+    edicoes_extras = bool(options.get("edicoes_extras", False))
+
+    # Chave da logomarca (OFF por padrão)
+    usar_logo = bool(options.get("usar_logo", False))
+
+    # Velocidade: só randomiza se edicoes_extras estiver ligada
     try:
-        speed = float(options.get("speed_factor", 0))
+        speed = float(options.get("speed_factor", 1.0))
     except (TypeError, ValueError):
-        speed = 0
-    if speed <= 0 or abs(speed - 1.0) < 0.001:
-        speed = round(random.uniform(0.97, 1.04), 4)
+        speed = 1.0
+
+    if edicoes_extras:
+        # Se veio 0 ou 1.0, randomiza; senão respeita o valor enviado
+        if speed <= 0 or abs(speed - 1.0) < 0.001:
+            speed = round(random.uniform(0.97, 1.04), 4)
+    else:
+        speed = 1.0
+
     if speed <= 0:
         speed = 1.0
 
     return {
+        "edicoes_extras": edicoes_extras,
+        "usar_logo": usar_logo,
+        # Sub-opções só fazem efeito se edicoes_extras=True
         "light_crop": bool(options.get("light_crop", True)),
         "color_adjust": bool(options.get("color_adjust", True)),
         "subtle_grain": bool(options.get("subtle_grain", True)),
@@ -517,23 +537,25 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
     )
 
     # Todos os filtros visuais são acumulados aqui e executados uma única vez.
-    # Transformações mais fortes + variação por vídeo.
+    # Edições extras só rodam se a chave "edicoes_extras" estiver ligada.
     video_filters = []
     if crop is not None:
         video_filters.append(f"crop={cw0}:{ch0}:{cx0}:{cy0}")
 
-    if opcoes["light_crop"]:
+    edicoes = opcoes.get("edicoes_extras", False)
+
+    if edicoes and opcoes["light_crop"]:
         crop_pct = random.uniform(0.01, 0.03)
         video_filters.append(
             f"crop=iw*(1-{crop_pct:.4f}):ih*(1-{crop_pct:.4f})"
         )
 
     do_flip = False
-    if opcoes.get("random_flip", True) and random.random() < 1.0:  # 100% dos vídeos
+    if edicoes and opcoes.get("random_flip", True):
         video_filters.append("hflip")
         do_flip = True
 
-    if opcoes["color_adjust"] or opcoes.get("stronger_visuals", True):
+    if edicoes and (opcoes["color_adjust"] or opcoes.get("stronger_visuals", True)):
         brightness = round(random.uniform(0.02, 0.06), 3)
         contrast = round(random.uniform(1.03, 1.10), 3)
         saturation = round(random.uniform(1.05, 1.18), 3)
@@ -549,16 +571,16 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
             "curves=all='0/0 0.25/0.22 0.5/0.52 0.75/0.78 1/1'"
         )
 
-    if opcoes["subtle_grain"] or opcoes.get("stronger_visuals", True):
+    if edicoes and (opcoes["subtle_grain"] or opcoes.get("stronger_visuals", True)):
         grain_strength = random.randint(6, 12)
         video_filters.append(f"noise=alls={grain_strength}:allf=t")
 
-    if opcoes.get("vignette", True):
+    if edicoes and opcoes.get("vignette", True):
         video_filters.append(
             f"vignette=angle=PI/{random.uniform(3.2, 4.8):.2f}:mode=forward"
         )
 
-    if opcoes.get("dynamic_zoom", True):
+    if edicoes and opcoes.get("dynamic_zoom", True):
         zoom = round(random.uniform(1.04, 1.10), 3)
         video_filters.append(
             f"scale=iw*{zoom}:ih*{zoom},"
@@ -575,10 +597,10 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
         "setsar=1",
     ]
 
-    # ---- Logo (somente no perfil adultosofrido) ----
+    # ---- Logo: usa a logo do perfil atual, se a chave estiver ligada ----
     perfil_cfg = PERFIS.get(PERFIL_ATUAL, {})
     usar_logo = (
-        PERFIL_ATUAL == "adultosofrido"
+        opcoes.get("usar_logo", False)
         and perfil_cfg.get("logo")
         and os.path.exists(perfil_cfg["logo"])
     )
