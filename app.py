@@ -47,9 +47,10 @@ GERACAO_LOCK = threading.Lock()
 ANALISE_LOCK = threading.Lock()
 
 # ----------------- AUTOMAÇÃO REMOTA DA ABA DE REELS -----------------
-# O Railway guarda apenas a tarefa e os links coletados.
-# Um pequeno agente no PC do usuário abre o Chrome localmente, coleta os Reels
-# e devolve os links para estas rotas autenticadas.
+# O Railway guarda a tarefa e recebe os vídeos já baixados pelo PC.
+# O agente local abre o Chrome, coleta/filtra os Reels, baixa no próprio PC
+# e envia os arquivos para o Railway analisar. O Railway não precisa acessar
+# o Instagram durante a automação.
 AUTOMACAO_TOKEN = os.environ.get("AUTOMACAO_TOKEN", "").strip()
 
 AUTOMACAO_LOCK = threading.Lock()
@@ -59,8 +60,11 @@ AUTOMACAO_STATUS = {
     "mensagem": "Pronto para começar.",
     "job_id": None,
     "quantidade": 0,
+    "filtro_padrao": False,
     "encontrados": 0,
     "links": [],
+    "itens": [],
+    "falhas": [],
     "erro": None,
     "agente_ultimo_ping": 0.0,
     "agente_nome": None,
@@ -93,6 +97,13 @@ def _snapshot_automacao():
     with AUTOMACAO_LOCK:
         dados = dict(AUTOMACAO_STATUS)
         dados["agente_online"] = _agente_online_locked()
+
+        # Os itens podem conter frames em base64. Não devolvemos tudo no /status
+        # a cada 1 segundo; a interface busca incrementalmente em /itens.
+        itens = AUTOMACAO_STATUS.get("itens") or []
+        dados["itens_prontos"] = len(itens)
+        dados.pop("itens", None)
+
         # Nunca devolve dados sensíveis.
         dados.pop("agente_ultimo_ping", None)
         return dados
@@ -141,6 +152,7 @@ def iniciar_automacao_reels():
     except (TypeError, ValueError):
         quantidade = 10
     quantidade = max(1, min(quantidade, 100))
+    filtro_padrao = bool(dados.get("filtro_padrao", False))
 
     with AUTOMACAO_LOCK:
         if not _agente_online_locked():
@@ -161,8 +173,11 @@ def iniciar_automacao_reels():
             "mensagem": "Tarefa enviada. Aguardando o PC começar a coleta...",
             "job_id": job_id,
             "quantidade": quantidade,
+            "filtro_padrao": filtro_padrao,
             "encontrados": 0,
             "links": [],
+            "itens": [],
+            "falhas": [],
             "erro": None,
         })
 
@@ -170,6 +185,7 @@ def iniciar_automacao_reels():
         "ok": True,
         "job_id": job_id,
         "quantidade": quantidade,
+        "filtro_padrao": filtro_padrao,
         "mensagem": "Tarefa enviada ao agente do PC.",
     })
 
@@ -180,6 +196,33 @@ def status_automacao_reels():
     if not autorizado:
         return jsonify({"erro": erro}), 401
     return jsonify(_snapshot_automacao())
+
+
+@app.route("/automacao-reels/itens")
+def itens_automacao_reels():
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    try:
+        inicio = int(request.args.get("from", "0"))
+    except (TypeError, ValueError):
+        inicio = 0
+    inicio = max(0, inicio)
+
+    with AUTOMACAO_LOCK:
+        itens = AUTOMACAO_STATUS.get("itens") or []
+        lote = itens[inicio:inicio + 20]
+        total = len(itens)
+        job_id = AUTOMACAO_STATUS.get("job_id")
+
+    return jsonify({
+        "job_id": job_id,
+        "from": inicio,
+        "total": total,
+        "itens": lote,
+        "proximo": inicio + len(lote),
+    })
 
 
 @app.route("/agente/heartbeat", methods=["POST"])
@@ -219,6 +262,7 @@ def agente_tarefa():
                 "tem_tarefa": True,
                 "job_id": AUTOMACAO_STATUS["job_id"],
                 "quantidade": AUTOMACAO_STATUS["quantidade"],
+                "filtro_padrao": bool(AUTOMACAO_STATUS.get("filtro_padrao", False)),
             })
 
     return jsonify({"tem_tarefa": False})
@@ -267,9 +311,12 @@ def agente_concluir():
     dados = request.get_json(silent=True) or {}
     job_id = dados.get("job_id")
     links = dados.get("links") or []
+    falhas = dados.get("falhas") or []
 
     if not isinstance(links, list):
-        return jsonify({"erro": "Formato de links inválido."}), 400
+        links = []
+    if not isinstance(falhas, list):
+        falhas = []
 
     links_limpos = []
     vistos = set()
@@ -279,10 +326,22 @@ def agente_concluir():
         link = link.strip()
         if not link or link in vistos:
             continue
-        if not link.startswith(("https://www.instagram.com/reel/", "https://instagram.com/reel/")):
+        if not link.startswith((
+            "https://www.instagram.com/reel/",
+            "https://instagram.com/reel/",
+        )):
             continue
         vistos.add(link)
         links_limpos.append(link)
+
+    falhas_limpas = []
+    for falha in falhas[:100]:
+        if not isinstance(falha, dict):
+            continue
+        falhas_limpas.append({
+            "url": str(falha.get("url") or "")[:500],
+            "erro": str(falha.get("erro") or "Falha")[:500],
+        })
 
     with AUTOMACAO_LOCK:
         AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
@@ -290,16 +349,29 @@ def agente_concluir():
         if job_id != AUTOMACAO_STATUS.get("job_id"):
             return jsonify({"erro": "Essa tarefa não é mais a tarefa atual."}), 409
 
+        prontos = len(AUTOMACAO_STATUS.get("itens") or [])
+        total = int(AUTOMACAO_STATUS.get("quantidade") or 0)
+
+        mensagem = f"Concluído: {prontos}/{total} Reel(s) enviados e analisados."
+        if falhas_limpas:
+            mensagem += f" {len(falhas_limpas)} falhou(aram) no PC/envio."
+
         AUTOMACAO_STATUS.update({
             "rodando": False,
             "estado": "concluido",
-            "mensagem": f"Concluído: {len(links_limpos)} Reel(s) coletado(s).",
+            "mensagem": mensagem,
             "encontrados": len(links_limpos),
             "links": links_limpos,
+            "falhas": falhas_limpas,
             "erro": None,
         })
 
-    return jsonify({"ok": True, "quantidade": len(links_limpos)})
+    return jsonify({
+        "ok": True,
+        "coletados": len(links_limpos),
+        "prontos": prontos,
+        "falhas": len(falhas_limpas),
+    })
 
 
 @app.route("/agente/erro", methods=["POST"])
@@ -402,6 +474,84 @@ def _analisar_arquivo(entrada, nome_seguro, job_id):
         "frame": "data:image/jpeg;base64," + b64,
         "nome": nome_seguro,
     }
+
+
+@app.route("/agente/upload-video", methods=["POST"])
+def agente_upload_video():
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    if _corpo_maior_que(MAX_VIDEO_UPLOAD_BYTES):
+        return jsonify({
+            "erro": f"Vídeo muito grande. Limite: {MAX_VIDEO_UPLOAD_MB} MB."
+        }), 413
+
+    task_id = (request.form.get("job_id") or "").strip()
+    reel_url = (request.form.get("reel_url") or "").strip()
+
+    if "video" not in request.files:
+        return jsonify({"erro": "Nenhum vídeo enviado pelo agente."}), 400
+
+    video = request.files["video"]
+    if not video.filename:
+        return jsonify({"erro": "Arquivo de vídeo sem nome."}), 400
+
+    # Confere se o upload pertence à tarefa atual.
+    with AUTOMACAO_LOCK:
+        AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
+
+        if task_id != AUTOMACAO_STATUS.get("job_id"):
+            return jsonify({"erro": "Essa tarefa não é mais a tarefa atual."}), 409
+
+        if not AUTOMACAO_STATUS.get("rodando"):
+            return jsonify({"erro": "Não existe coleta ativa."}), 409
+
+        # Retry seguro: se o agente reenviar o mesmo Reel porque a resposta caiu,
+        # devolvemos o item já analisado em vez de duplicar.
+        for existente in AUTOMACAO_STATUS.get("itens") or []:
+            if reel_url and existente.get("reel_url") == reel_url:
+                return jsonify(existente)
+
+    video_job_id = uuid.uuid4().hex
+    nome_seguro = secure_filename(video.filename) or f"reel_{video_job_id}.mp4"
+    entrada = os.path.join(
+        WORK_DIR,
+        f"{video_job_id}_agente_{nome_seguro}"
+    )
+
+    video.save(entrada)
+
+    try:
+        analisado = _analisar_arquivo(
+            entrada,
+            nome_seguro,
+            video_job_id,
+        )
+    except Exception as e:
+        try:
+            os.remove(entrada)
+        except OSError:
+            pass
+        return jsonify({"erro": f"Falha ao analisar vídeo enviado pelo PC: {e}"}), 500
+
+    item = dict(analisado)
+    item["reel_url"] = reel_url
+    item["origem"] = "agente_pc"
+
+    with AUTOMACAO_LOCK:
+        # A tarefa pode ter sido trocada enquanto o FFmpeg analisava.
+        if task_id != AUTOMACAO_STATUS.get("job_id"):
+            return jsonify({"erro": "A tarefa mudou durante a análise."}), 409
+
+        AUTOMACAO_STATUS.setdefault("itens", []).append(item)
+        prontos = len(AUTOMACAO_STATUS["itens"])
+        total = int(AUTOMACAO_STATUS.get("quantidade") or 0)
+        AUTOMACAO_STATUS["mensagem"] = (
+            f"PC baixando/enviando • {prontos}/{total} analisado(s) no Railway"
+        )
+
+    return jsonify(item)
 
 
 @app.route("/detectar", methods=["POST"])
