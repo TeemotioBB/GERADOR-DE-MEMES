@@ -163,6 +163,12 @@
   }
   .btn-rodar:hover{background:#d0ecdf;transform:translateY(-1px);}
   .btn-rodar:disabled{opacity:.55;cursor:not-allowed;transform:none;}
+  .btn-cancelar-auto{
+    border:1px solid #efb6bd;background:#fff;color:#b42336;font-weight:750;
+    border-radius:11px;padding:10px 14px;cursor:pointer;font-family:inherit;
+  }
+  .btn-cancelar-auto:hover{background:#fff1f3;}
+
   .automacao-status{
     font-size:12px;color:var(--cinza);margin-top:10px;min-height:18px;line-height:1.4;
   }
@@ -462,6 +468,7 @@
           <input id="qtdReels" type="number" min="1" max="100" value="10">
         </div>
         <button class="btn-rodar" id="btnRodar" type="button">▶ Rodar</button>
+        <button class="btn-cancelar-auto" id="btnCancelarAuto" type="button" style="display:none">✕ Cancelar</button>
       </div>
 
       <div class="automacao-status" id="statusAutomacao">
@@ -522,6 +529,7 @@ https://www.instagram.com/reel/..."></textarea>
   const chaveAutomacao = document.getElementById('chaveAutomacao');
   const statusAgente = document.getElementById('statusAgente');
   const chkFiltroPadrao = document.getElementById('chkFiltroPadrao');
+  const btnCancelarAuto = document.getElementById('btnCancelarAuto');
 
   let timerAutomacao = null;
   let timerAgente = null;
@@ -557,6 +565,7 @@ https://www.instagram.com/reel/..."></textarea>
   atualizarSub();
 
   btnRodar.addEventListener('click', iniciarAutomacaoReels);
+  btnCancelarAuto.addEventListener('click', cancelarAutomacaoReels);
   btnImportar.addEventListener('click', importarInstagram);
 
   function chaveDaAutomacao(){
@@ -650,7 +659,9 @@ https://www.instagram.com/reel/..."></textarea>
 
       if (dados.agente_online){
         const nome = dados.agente_nome ? ` (${dados.agente_nome})` : '';
-        statusAgente.textContent = `🟢 Agente do PC conectado${nome}`;
+        statusAgente.textContent = dados.geracao_local_disponivel
+          ? `🟢 Agente conectado${nome} • ⚡ geração econômica no PC`
+          : `🟢 Agente conectado${nome} • coleta local • geração pelo Railway`;
       } else {
         statusAgente.textContent =
           '🔴 Agente do PC offline — abra INICIAR_AGENTE.bat no computador.';
@@ -694,6 +705,7 @@ https://www.instagram.com/reel/..."></textarea>
     btnRodar.disabled = true;
     qtdReels.disabled = true;
     chkFiltroPadrao.disabled = true;
+    btnCancelarAuto.style.display = 'inline-flex';
     statusAutomacao.className = 'automacao-status';
     statusAutomacao.textContent = 'Enviando tarefa para o seu PC...';
 
@@ -717,9 +729,33 @@ https://www.instagram.com/reel/..."></textarea>
       btnRodar.disabled = false;
       qtdReels.disabled = false;
       chkFiltroPadrao.disabled = false;
+      btnCancelarAuto.style.display = 'none';
       statusAutomacao.className = 'automacao-status erro';
       statusAutomacao.textContent = err.message || 'Falha ao iniciar.';
       verificarAgente();
+    }
+  }
+
+  async function cancelarAutomacaoReels(){
+    if (!chaveDaAutomacao()) return;
+    btnCancelarAuto.disabled = true;
+    try {
+      const resp = await fetchAutomacao('/automacao-reels/cancelar', {method:'POST'});
+      const dados = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(dados.erro || 'Não foi possível cancelar.');
+      if (timerAutomacao) clearTimeout(timerAutomacao);
+      jobIdAutomacaoAtual = null;
+      statusAutomacao.className = 'automacao-status';
+      statusAutomacao.textContent = 'Coleta cancelada. Você já pode iniciar outra.';
+      btnRodar.disabled = false;
+      qtdReels.disabled = false;
+      chkFiltroPadrao.disabled = false;
+      btnCancelarAuto.style.display = 'none';
+    } catch (err) {
+      statusAutomacao.className = 'automacao-status erro';
+      statusAutomacao.textContent = err.message || 'Falha ao cancelar.';
+    } finally {
+      btnCancelarAuto.disabled = false;
     }
   }
 
@@ -743,6 +779,7 @@ https://www.instagram.com/reel/..."></textarea>
         btnRodar.disabled = false;
         qtdReels.disabled = false;
         chkFiltroPadrao.disabled = false;
+        btnCancelarAuto.style.display = 'none';
         jobIdAutomacaoAtual = null;
         return;
       }
@@ -769,6 +806,7 @@ https://www.instagram.com/reel/..."></textarea>
         btnRodar.disabled = false;
         qtdReels.disabled = false;
         chkFiltroPadrao.disabled = false;
+        btnCancelarAuto.style.display = 'none';
         jobIdAutomacaoAtual = null;
         verificarAgente();
         return;
@@ -783,6 +821,7 @@ https://www.instagram.com/reel/..."></textarea>
       btnRodar.disabled = false;
       qtdReels.disabled = false;
       chkFiltroPadrao.disabled = false;
+      btnCancelarAuto.style.display = 'none';
       jobIdAutomacaoAtual = null;
     }
   }
@@ -1268,6 +1307,76 @@ https://www.instagram.com/reel/..."></textarea>
     resumo.classList.remove('mostrar');
   });
 
+  async function gerarNoRailway(payload){
+    const resp = await fetch('/gerar',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)
+    });
+    const j = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(j.erro || 'Erro ao gerar no Railway.');
+    return {modo:'railway', id:j.id || payload.id};
+  }
+
+  async function aguardarGeracaoPC(taskId, payload, indice, total){
+    const inicio = Date.now();
+    const limiteMs = 20 * 60 * 1000;
+
+    while (Date.now() - inicio < limiteMs){
+      await new Promise(r => setTimeout(r, 1200));
+      const resp = await fetchAutomacao(`/geracao-hibrida/status/${taskId}`);
+      const dados = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(dados.erro || 'Falha ao acompanhar geração local.');
+
+      resumo.textContent = `${dados.mensagem || 'Gerando no PC...'} (${indice}/${total})`;
+
+      if (dados.estado === 'concluido'){
+        return {modo:'pc', id:dados.job_id || payload.id};
+      }
+      if (dados.estado === 'erro'){
+        throw new Error(dados.erro || 'A geração local falhou.');
+      }
+    }
+    throw new Error('A geração no PC excedeu o tempo limite.');
+  }
+
+  async function gerarHibrido(payload, indice, total){
+    // Sem chave, usa Railway normalmente. Nada fica dependente do agente.
+    if (!chaveDaAutomacao()){
+      return gerarNoRailway(payload);
+    }
+
+    try {
+      const resp = await fetchAutomacao('/gerar-hibrido',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload)
+      });
+      const dados = await resp.json().catch(() => ({}));
+
+      if (!resp.ok){
+        // Qualquer problema de comunicação com o modo econômico não bloqueia o usuário.
+        return gerarNoRailway(payload);
+      }
+
+      if (dados.modo !== 'pc' || !dados.task_id){
+        resumo.textContent = `PC indisponível • gerando no Railway (${indice}/${total})...`;
+        return gerarNoRailway(payload);
+      }
+
+      try {
+        resumo.textContent = `⚡ Gerando no PC (${indice}/${total})...`;
+        return await aguardarGeracaoPC(dados.task_id, payload, indice, total);
+      } catch (erroLocal) {
+        // Fallback automático: PC desligou, FFmpeg faltou, asset falhou, etc.
+        resumo.textContent = `PC não concluiu • continuando no Railway (${indice}/${total})...`;
+        return gerarNoRailway(payload);
+      }
+    } catch (_) {
+      return gerarNoRailway(payload);
+    }
+  }
+
   btnGerar.addEventListener('click', async () => {
     const prontos = itens.filter(it => it.jobId && ['auto','conferir','ok','erro'].includes(it.estado));
     if (!prontos.length){ alert('Aguarde a análise dos vídeos ou adicione algum.'); return; }
@@ -1287,22 +1396,21 @@ https://www.instagram.com/reel/..."></textarea>
       it.estado='processando'; render();
       resumo.textContent=`Gerando ${feitos+1} de ${fila.length}...`;
       try {
-        const resp = await fetch('/gerar',{
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({
-            id: it.jobId,
-            legenda: it.legenda.trim(),
-            crop: it.box,
-            perfil: perfilSel,
-            uniqueness: {
-              edicoes_extras: edicoesExtras,
-              usar_logo: usarLogo
-            }
-          })
-        });
-        const j = await resp.json();
-        if (!resp.ok) throw new Error(j.erro||'erro');
-        it.estado='ok'; ok++; ids.push(it.jobId);
+        const payload = {
+          id: it.jobId,
+          legenda: it.legenda.trim(),
+          crop: it.box,
+          perfil: perfilSel,
+          uniqueness: {
+            edicoes_extras: edicoesExtras,
+            usar_logo: usarLogo
+          }
+        };
+        const resultadoGeracao = await gerarHibrido(payload, feitos + 1, fila.length);
+        it.estado='ok';
+        it.modoGeracao = resultadoGeracao.modo;
+        ok++;
+        ids.push(it.jobId);
       } catch(err){ it.estado='erro'; it.msgErro=err.message; falhas++; }
       feitos++; preenche.style.width=(feitos/fila.length*100)+'%'; render();
     }
