@@ -130,6 +130,24 @@
     margin-bottom:10px;font-size:12px;color:var(--cinza);line-height:1.4;
     padding:8px 10px;border-radius:10px;background:rgba(255,255,255,.58);
   }
+  .automacao-filtro{
+    display:flex;align-items:flex-start;gap:10px;
+    margin:0 0 11px;padding:10px 11px;
+    border:1px solid #c9dcd3;border-radius:11px;
+    background:rgba(255,255,255,.58);
+    cursor:pointer;
+  }
+  .automacao-filtro input{
+    width:18px;height:18px;flex:0 0 auto;margin-top:1px;
+    accent-color:#169873;
+  }
+  .automacao-filtro strong{
+    display:block;font-size:13px;color:var(--tinta);line-height:1.25;
+  }
+  .automacao-filtro span{
+    display:block;font-size:11px;color:var(--cinza);
+    margin-top:3px;line-height:1.35;
+  }
   .automacao-qtd label{
     display:block;font-size:11px;font-weight:750;color:var(--cinza);margin-bottom:5px;
   }
@@ -430,6 +448,14 @@
         ⚪ Informe a chave para verificar o PC.
       </div>
 
+      <label class="automacao-filtro" for="chkFiltroPadrao">
+        <input type="checkbox" id="chkFiltroPadrao" checked>
+        <span>
+          <strong>Filtrar apenas o padrão do post</strong>
+          <span>Avatar/nome/texto em cima + vídeo abaixo. Os outros Reels serão ignorados.</span>
+        </span>
+      </label>
+
       <div class="automacao-controles">
         <div class="automacao-qtd">
           <label for="qtdReels">QUANTIDADE</label>
@@ -495,6 +521,7 @@ https://www.instagram.com/reel/..."></textarea>
   const statusAutomacao = document.getElementById('statusAutomacao');
   const chaveAutomacao = document.getElementById('chaveAutomacao');
   const statusAgente = document.getElementById('statusAgente');
+  const chkFiltroPadrao = document.getElementById('chkFiltroPadrao');
 
   let timerAutomacao = null;
   let timerAgente = null;
@@ -608,6 +635,7 @@ https://www.instagram.com/reel/..."></textarea>
 
     btnRodar.disabled = true;
     qtdReels.disabled = true;
+    chkFiltroPadrao.disabled = true;
     statusAutomacao.className = 'automacao-status';
     statusAutomacao.textContent = 'Enviando tarefa para o seu PC...';
 
@@ -615,7 +643,10 @@ https://www.instagram.com/reel/..."></textarea>
       const resp = await fetchAutomacao('/automacao-reels/iniciar', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({quantidade})
+        body: JSON.stringify({
+          quantidade,
+          filtro_padrao: chkFiltroPadrao.checked
+        })
       });
 
       const dados = await resp.json().catch(() => ({}));
@@ -626,6 +657,7 @@ https://www.instagram.com/reel/..."></textarea>
     } catch (err) {
       btnRodar.disabled = false;
       qtdReels.disabled = false;
+      chkFiltroPadrao.disabled = false;
       statusAutomacao.className = 'automacao-status erro';
       statusAutomacao.textContent = err.message || 'Falha ao iniciar.';
       verificarAgente();
@@ -646,6 +678,7 @@ https://www.instagram.com/reel/..."></textarea>
         statusAutomacao.className = 'automacao-status erro';
         btnRodar.disabled = false;
         qtdReels.disabled = false;
+        chkFiltroPadrao.disabled = false;
         jobIdAutomacaoAtual = null;
         return;
       }
@@ -658,6 +691,7 @@ https://www.instagram.com/reel/..."></textarea>
           statusAutomacao.textContent = 'A coleta terminou, mas nenhum link foi encontrado.';
           btnRodar.disabled = false;
           qtdReels.disabled = false;
+          chkFiltroPadrao.disabled = false;
           jobIdAutomacaoAtual = null;
           return;
         }
@@ -682,6 +716,7 @@ https://www.instagram.com/reel/..."></textarea>
 
         btnRodar.disabled = false;
         qtdReels.disabled = false;
+        chkFiltroPadrao.disabled = false;
         jobIdAutomacaoAtual = null;
         verificarAgente();
         return;
@@ -694,6 +729,7 @@ https://www.instagram.com/reel/..."></textarea>
       statusAutomacao.textContent = err.message || 'Perdi a conexão com o servidor.';
       btnRodar.disabled = false;
       qtdReels.disabled = false;
+      chkFiltroPadrao.disabled = false;
       jobIdAutomacaoAtual = null;
     }
   }
