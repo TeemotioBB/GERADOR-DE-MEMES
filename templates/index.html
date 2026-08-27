@@ -432,7 +432,7 @@
         <div>
           <div class="automacao-titulo">🤖 Minha aba de Reels</div>
           <div class="automacao-subtitulo">
-            Envia a tarefa para o seu PC. O Chrome local coleta os Reels e devolve os links para este site.
+            Seu PC coleta, filtra e baixa os Reels. Depois envia os vídeos prontos para análise no Railway.
           </div>
         </div>
         <span class="limite-badge">automático</span>
@@ -526,6 +526,7 @@ https://www.instagram.com/reel/..."></textarea>
   let timerAutomacao = null;
   let timerAgente = null;
   let jobIdAutomacaoAtual = null;
+  let itensAgenteRecebidos = 0;
 
   try {
     chaveAutomacao.value = localStorage.getItem('automacao_reels_key_v1') || '';
@@ -572,6 +573,62 @@ https://www.instagram.com/reel/..."></textarea>
     return fetch(url, {...options, headers, cache:'no-store'});
   }
 
+  async function sincronizarItensDoAgente(){
+    if (!chaveDaAutomacao()) return 0;
+
+    let adicionados = 0;
+
+    while (true){
+      const resp = await fetchAutomacao(
+        `/automacao-reels/itens?from=${itensAgenteRecebidos}`
+      );
+      const dados = await resp.json().catch(() => ({}));
+
+      if (!resp.ok){
+        throw new Error(dados.erro || 'Falha ao receber vídeos do agente.');
+      }
+
+      const novos = Array.isArray(dados.itens) ? dados.itens : [];
+
+      for (const j of novos){
+        // Evita duplicar em caso de polling/reload.
+        if (itens.some(it => it.jobId === j.id)) continue;
+
+        const it = {
+          localId: proximoId++,
+          file: null,
+          nome: j.nome || 'reel_agente.mp4',
+          urlInstagram: j.reel_url || '',
+          estado: (Number(j.confianca) >= 0.6) ? 'auto' : 'conferir',
+          jobId: j.id,
+          legenda: '',
+          vw: Number(j.largura) || 0,
+          vh: Number(j.altura) || 0,
+          frame: j.frame || null,
+          box: j.box || null,
+          conf: Number(j.confianca) || 0,
+          origemAgente: true
+        };
+
+        itens.push(it);
+        adicionados++;
+        render();
+
+        if (it.frame && it.box){
+          lerLegenda(it);
+        }
+      }
+
+      itensAgenteRecebidos = Number(dados.proximo) || itensAgenteRecebidos;
+
+      if (!novos.length || itensAgenteRecebidos >= Number(dados.total || 0)){
+        break;
+      }
+    }
+
+    return adicionados;
+  }
+
   async function verificarAgente(){
     if (timerAgente) clearTimeout(timerAgente);
 
@@ -599,15 +656,16 @@ https://www.instagram.com/reel/..."></textarea>
           '🔴 Agente do PC offline — abra INICIAR_AGENTE.bat no computador.';
       }
 
-      // Se a página foi recarregada depois de uma coleta pronta, recupera os links
-      // sem importar automaticamente duas vezes.
-      if (!jobIdAutomacaoAtual && dados.estado === 'concluido' && Array.isArray(dados.links) && dados.links.length){
-        if (!inputInstagram.value.trim()){
-          inputInstagram.value = dados.links.join('\n');
-          statusImportar.textContent =
-            `${dados.links.length} link(s) recuperado(s). Clique em Importar Reels para usar.`;
-          statusImportar.className = 'importar-status';
-        }
+      // Recupera itens já enviados pelo PC, inclusive após recarregar a página.
+      if (!jobIdAutomacaoAtual && Number(dados.itens_prontos || 0) > itensAgenteRecebidos){
+        try {
+          const n = await sincronizarItensDoAgente();
+          if (n){
+            statusImportar.textContent =
+              `${n} vídeo(s) recuperado(s) do agente e pronto(s) para revisão.`;
+            statusImportar.className = 'importar-status';
+          }
+        } catch (_) {}
       }
     } catch (_) {
       statusAgente.textContent = '🔴 Não foi possível verificar o agente.';
@@ -653,6 +711,7 @@ https://www.instagram.com/reel/..."></textarea>
       if (!resp.ok) throw new Error(dados.erro || 'Não foi possível iniciar.');
 
       jobIdAutomacaoAtual = dados.job_id || null;
+      itensAgenteRecebidos = 0;
       acompanharAutomacaoReels();
     } catch (err) {
       btnRodar.disabled = false;
@@ -670,9 +729,14 @@ https://www.instagram.com/reel/..."></textarea>
     try {
       const resp = await fetchAutomacao('/automacao-reels/status');
       const dados = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(dados.erro || 'Falha ao acompanhar a coleta.');
+      if (!resp.ok) throw new Error(dados.erro || 'Falha ao acompanhar a automação.');
 
-      statusAutomacao.textContent = dados.mensagem || 'Coletando...';
+      statusAutomacao.textContent = dados.mensagem || 'Processando...';
+
+      // Os vídeos vão aparecendo na página conforme o PC baixa e envia.
+      if (Number(dados.itens_prontos || 0) > itensAgenteRecebidos){
+        await sincronizarItensDoAgente();
+      }
 
       if (dados.estado === 'erro'){
         statusAutomacao.className = 'automacao-status erro';
@@ -684,41 +748,46 @@ https://www.instagram.com/reel/..."></textarea>
       }
 
       if (dados.estado === 'concluido'){
-        statusAutomacao.className = 'automacao-status ok';
+        // Garante que buscamos o último lote.
+        await sincronizarItensDoAgente();
 
-        const links = Array.isArray(dados.links) ? dados.links : [];
-        if (!links.length){
-          statusAutomacao.textContent = 'A coleta terminou, mas nenhum link foi encontrado.';
-          btnRodar.disabled = false;
-          qtdReels.disabled = false;
-          chkFiltroPadrao.disabled = false;
-          jobIdAutomacaoAtual = null;
-          return;
-        }
+        const prontos = Number(dados.itens_prontos || itensAgenteRecebidos || 0);
+        const falhas = Array.isArray(dados.falhas) ? dados.falhas.length : 0;
 
-        inputInstagram.value = links.join('\n');
+        statusAutomacao.className = falhas
+          ? 'automacao-status erro'
+          : 'automacao-status ok';
+
         statusAutomacao.textContent =
-          `Coleta concluída: ${links.length} link(s). Importando automaticamente...`;
-        statusImportar.textContent =
-          `Preparando importação automática de ${links.length} Reels...`;
-        statusImportar.className = 'importar-status';
+          `Pronto: ${prontos} vídeo(s) baixado(s) pelo PC e analisado(s) no Railway` +
+          (falhas ? ` • ${falhas} falhou(aram).` : '.');
 
-        try {
-          await importarInstagram();
-          statusAutomacao.textContent =
-            `Pronto: ${links.length} Reel(s) coletado(s) e enviados para análise.`;
-          statusAutomacao.className = 'automacao-status ok';
-        } catch (_) {
-          statusAutomacao.textContent =
-            'A coleta terminou, mas houve um erro durante a importação automática.';
-          statusAutomacao.className = 'automacao-status erro';
-        }
+        statusImportar.textContent =
+          `${prontos} vídeo(s) recebido(s). Revise e clique em Gerar todos quando quiser.`;
+        statusImportar.className = falhas ? 'importar-status erro' : 'importar-status';
 
         btnRodar.disabled = false;
         qtdReels.disabled = false;
         chkFiltroPadrao.disabled = false;
         jobIdAutomacaoAtual = null;
         verificarAgente();
+        return;
+      }
+
+      statusAutomacao.className = 'automacao-status';
+      timerAutomacao = setTimeout(acompanharAutomacaoReels, 1200);
+
+    } catch (err) {
+      statusAutomacao.className = 'automacao-status erro';
+      statusAutomacao.textContent = err.message || 'Perdi a conexão com o servidor.';
+      btnRodar.disabled = false;
+      qtdReels.disabled = false;
+      chkFiltroPadrao.disabled = false;
+      jobIdAutomacaoAtual = null;
+    }
+  }
+
+  verificarAgente();
         return;
       }
 
