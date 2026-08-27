@@ -19,6 +19,7 @@ from werkzeug.utils import secure_filename
 import meme_maker
 import detector
 import instagram_import
+import reels_collector
 import cv2
 import base64
 
@@ -46,6 +47,72 @@ GERACAO_LOCK = threading.Lock()
 # o servidor caso existam duas abas ou dois usuários simultâneos.
 ANALISE_LOCK = threading.Lock()
 
+# ----------------- AUTOMAÇÃO LOCAL DA ABA DE REELS -----------------
+COLETA_LOCK = threading.Lock()
+COLETA_STATUS_LOCK = threading.Lock()
+COLETA_STATUS = {
+    "rodando": False,
+    "estado": "parado",
+    "mensagem": "Pronto para começar.",
+    "quantidade": 0,
+    "encontrados": 0,
+    "links": [],
+    "erro": None,
+}
+
+
+def _esta_no_railway():
+    return bool(
+        os.environ.get("RAILWAY_ENVIRONMENT")
+        or os.environ.get("RAILWAY_PROJECT_ID")
+        or os.environ.get("RAILWAY_SERVICE_ID")
+    )
+
+
+def _atualizar_coleta(**campos):
+    with COLETA_STATUS_LOCK:
+        COLETA_STATUS.update(campos)
+
+
+def _snapshot_coleta():
+    with COLETA_STATUS_LOCK:
+        return dict(COLETA_STATUS)
+
+
+def _executar_coleta_reels(quantidade):
+    try:
+        def progresso(estado, mensagem, encontrados=0):
+            _atualizar_coleta(
+                rodando=True,
+                estado=estado,
+                mensagem=mensagem,
+                encontrados=encontrados,
+                erro=None,
+            )
+
+        with COLETA_LOCK:
+            links = reels_collector.coletar(
+                quantidade=quantidade,
+                callback=progresso,
+            )
+
+        _atualizar_coleta(
+            rodando=False,
+            estado="concluido",
+            mensagem=f"Concluído: {len(links)} Reel(s) coletado(s).",
+            encontrados=len(links),
+            links=links,
+            erro=None,
+        )
+    except Exception as e:
+        _atualizar_coleta(
+            rodando=False,
+            estado="erro",
+            mensagem=f"Falha na coleta: {e}",
+            erro=str(e),
+        )
+
+
 # A chave fica somente no servidor/Railway e nunca é enviada ao navegador.
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "").strip()
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001").strip()
@@ -70,6 +137,57 @@ def index():
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
+
+
+@app.route("/automacao-reels/iniciar", methods=["POST"])
+def iniciar_automacao_reels():
+    if _esta_no_railway():
+        return jsonify({
+            "erro": (
+                "A coleta da sua aba personalizada precisa rodar no seu computador. "
+                "Abra a versão local pelo iniciar_windows.bat."
+            )
+        }), 400
+
+    atual = _snapshot_coleta()
+    if atual.get("rodando"):
+        return jsonify({"erro": "Já existe uma coleta em andamento."}), 409
+
+    dados = request.get_json(silent=True) or {}
+
+    try:
+        quantidade = int(dados.get("quantidade", 10))
+    except (TypeError, ValueError):
+        quantidade = 10
+
+    quantidade = max(1, min(quantidade, 100))
+
+    _atualizar_coleta(
+        rodando=True,
+        estado="iniciando",
+        mensagem="Preparando o navegador...",
+        quantidade=quantidade,
+        encontrados=0,
+        links=[],
+        erro=None,
+    )
+
+    threading.Thread(
+        target=_executar_coleta_reels,
+        args=(quantidade,),
+        daemon=True,
+    ).start()
+
+    return jsonify({
+        "ok": True,
+        "mensagem": "Coleta iniciada.",
+        "quantidade": quantidade,
+    })
+
+
+@app.route("/automacao-reels/status")
+def status_automacao_reels():
+    return jsonify(_snapshot_coleta())
 
 
 @app.errorhandler(413)
