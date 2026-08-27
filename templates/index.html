@@ -788,22 +788,6 @@ https://www.instagram.com/reel/..."></textarea>
   }
 
   verificarAgente();
-        return;
-      }
-
-      statusAutomacao.className = 'automacao-status';
-      timerAutomacao = setTimeout(acompanharAutomacaoReels, 1200);
-    } catch (err) {
-      statusAutomacao.className = 'automacao-status erro';
-      statusAutomacao.textContent = err.message || 'Perdi a conexão com o servidor.';
-      btnRodar.disabled = false;
-      qtdReels.disabled = false;
-      chkFiltroPadrao.disabled = false;
-      jobIdAutomacaoAtual = null;
-    }
-  }
-
-  verificarAgente();
 
   function extrairLinksInstagram(texto){
     const encontrados = texto.match(/https?:\/\/(?:www\.)?instagram\.com\/(?:reel|reels|p)\/[^\s<>"]+/gi) || [];
