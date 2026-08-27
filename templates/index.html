@@ -539,6 +539,7 @@ https://www.instagram.com/reel/..."></textarea>
   // Railway continua sendo o caminho padrão.
   // O PC só entra quando o servidor confirma geração local disponível.
   let geracaoLocalDisponivel = false;
+  let geracaoLocalParalela = 1;
 
   try {
     chaveAutomacao.value = localStorage.getItem('automacao_reels_key_v1') || '';
@@ -666,6 +667,16 @@ https://www.instagram.com/reel/..."></textarea>
         dados.agente_online && dados.geracao_local_disponivel
       );
 
+      geracaoLocalParalela = geracaoLocalDisponivel
+        ? Math.max(
+            1,
+            Math.min(
+              2,
+              Number(dados.capacidades?.geracao_paralela || 2)
+            )
+          )
+        : 1;
+
       if (dados.agente_online){
         const nome = dados.agente_nome ? ` (${dados.agente_nome})` : '';
         statusAgente.textContent = geracaoLocalDisponivel
@@ -673,6 +684,7 @@ https://www.instagram.com/reel/..."></textarea>
           : `🟢 Agente conectado${nome} • coleta local • geração pelo Railway`;
       } else {
         geracaoLocalDisponivel = false;
+        geracaoLocalParalela = 1;
         statusAgente.textContent =
           '🔴 Agente do PC offline • geração continua pelo Railway.';
       }
@@ -1325,175 +1337,408 @@ https://www.instagram.com/reel/..."></textarea>
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify(payload)
     });
+
     const j = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(j.erro || 'Erro ao gerar no Railway.');
-    return {modo:'railway', id:j.id || payload.id};
+
+    if (!resp.ok){
+      throw new Error(j.erro || 'Erro ao gerar no Railway.');
+    }
+
+    return {
+      modo:'railway',
+      id:j.id || payload.id
+    };
   }
 
-  async function aguardarGeracaoPC(taskId, payload, indice, total){
+
+  async function aguardarGeracaoPC(taskId, payload, onProgress){
     const inicio = Date.now();
     const limiteMs = 20 * 60 * 1000;
 
     while (Date.now() - inicio < limiteMs){
-      await new Promise(r => setTimeout(r, 1200));
-      const resp = await fetchAutomacao(`/geracao-hibrida/status/${taskId}`);
-      const dados = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(dados.erro || 'Falha ao acompanhar geração local.');
+      await new Promise(r => setTimeout(r, 850));
 
-      resumo.textContent = `${dados.mensagem || 'Gerando no PC...'} (${indice}/${total})`;
+      const resp = await fetchAutomacao(
+        `/geracao-hibrida/status/${taskId}`
+      );
+
+      const dados = await resp.json().catch(() => ({}));
+
+      if (!resp.ok){
+        throw new Error(
+          dados.erro || 'Falha ao acompanhar geração local.'
+        );
+      }
+
+      if (onProgress){
+        onProgress(dados.mensagem || '⚡ Gerando no PC...');
+      }
 
       if (dados.estado === 'concluido'){
-        return {modo:'pc', id:dados.job_id || payload.id};
+        return {
+          modo:'pc',
+          id:dados.job_id || payload.id
+        };
       }
+
       if (dados.estado === 'erro'){
-        throw new Error(dados.erro || 'A geração local falhou.');
+        throw new Error(
+          dados.erro || 'A geração local falhou.'
+        );
       }
     }
+
     throw new Error('A geração no PC excedeu o tempo limite.');
   }
 
-  async function confirmarGeracaoLocalDisponivel(){
-    // Sem chave ou com agente já marcado como offline:
-    // não passa pela camada híbrida; usa a rota original do Railway.
-    if (!chaveDaAutomacao() || !geracaoLocalDisponivel){
-      return false;
+
+  async function consultarModoGeracaoDoLote(){
+    // Railway é sempre o fallback seguro.
+    if (!chaveDaAutomacao()){
+      return {
+        local:false,
+        concorrencia:1
+      };
     }
 
-    // Confere novamente logo antes de gerar.
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3500);
+    const timeout = setTimeout(
+      () => controller.abort(),
+      3500
+    );
 
     try {
-      const resp = await fetchAutomacao('/automacao-reels/status', {
-        signal: controller.signal
-      });
+      const resp = await fetchAutomacao(
+        '/automacao-reels/status',
+        {signal: controller.signal}
+      );
+
       const dados = await resp.json().catch(() => ({}));
 
+      if (!resp.ok){
+        geracaoLocalDisponivel = false;
+        geracaoLocalParalela = 1;
+
+        return {
+          local:false,
+          concorrencia:1
+        };
+      }
+
       geracaoLocalDisponivel = Boolean(
-        resp.ok &&
         dados.agente_online &&
         dados.geracao_local_disponivel
       );
 
-      return geracaoLocalDisponivel;
-    } catch (_) {
+      geracaoLocalParalela = geracaoLocalDisponivel
+        ? Math.max(
+            1,
+            Math.min(
+              2,
+              Number(
+                dados.capacidades?.geracao_paralela || 2
+              )
+            )
+          )
+        : 1;
+
+      return {
+        local:geracaoLocalDisponivel,
+        concorrencia:geracaoLocalParalela
+      };
+
+    } catch (_){
       geracaoLocalDisponivel = false;
-      return false;
+      geracaoLocalParalela = 1;
+
+      return {
+        local:false,
+        concorrencia:1
+      };
+
     } finally {
       clearTimeout(timeout);
     }
   }
 
-  async function gerarHibrido(payload, indice, total){
-    // A geração do Railway é o fallback e também o caminho padrão.
-    const podeUsarPC = await confirmarGeracaoLocalDisponivel();
 
-    if (!podeUsarPC){
-      resumo.textContent = `☁️ Gerando no Railway (${indice}/${total})...`;
+  async function gerarHibridoTurbo(
+    payload,
+    tentarPC,
+    onProgress
+  ){
+    if (!tentarPC){
+      if (onProgress){
+        onProgress('☁️ Gerando no Railway...');
+      }
       return gerarNoRailway(payload);
     }
 
     try {
-      const resp = await fetchAutomacao('/gerar-hibrido',{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(payload)
-      });
+      // O próprio servidor confirma se o agente continua online.
+      const resp = await fetchAutomacao(
+        '/gerar-hibrido',
+        {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(payload)
+        }
+      );
 
       const dados = await resp.json().catch(() => ({}));
 
-      // Se o PC deixou de estar disponível entre o status e a criação
-      // da tarefa, volta imediatamente para /gerar.
-      if (!resp.ok || dados.modo !== 'pc' || !dados.task_id){
-        geracaoLocalDisponivel = false;
-        resumo.textContent =
-          `☁️ PC indisponível • gerando no Railway (${indice}/${total})...`;
+      // Agente caiu entre o início do lote e este vídeo.
+      // Não bloqueia nada: vai direto ao Railway.
+      if (
+        !resp.ok ||
+        dados.modo !== 'pc' ||
+        !dados.task_id
+      ){
+        if (onProgress){
+          onProgress(
+            '☁️ PC indisponível • gerando no Railway...'
+          );
+        }
+
         return gerarNoRailway(payload);
       }
 
       try {
-        resumo.textContent = `⚡ Gerando no PC (${indice}/${total})...`;
         return await aguardarGeracaoPC(
           dados.task_id,
           payload,
-          indice,
-          total
+          onProgress
         );
-      } catch (_) {
-        // Se o agente cair no meio, não bloqueia o usuário.
-        geracaoLocalDisponivel = false;
-        resumo.textContent =
-          `☁️ PC não concluiu • continuando no Railway (${indice}/${total})...`;
+
+      } catch (_){
+        // Uma falha local não mata o lote nem desativa o modo
+        // econômico dos próximos vídeos.
+        if (onProgress){
+          onProgress(
+            '☁️ PC não concluiu • continuando no Railway...'
+          );
+        }
+
         return gerarNoRailway(payload);
       }
 
-    } catch (_) {
-      geracaoLocalDisponivel = false;
-      resumo.textContent = `☁️ Gerando no Railway (${indice}/${total})...`;
+    } catch (_){
+      if (onProgress){
+        onProgress('☁️ Gerando no Railway...');
+      }
+
       return gerarNoRailway(payload);
     }
   }
 
+
   btnGerar.addEventListener('click', async () => {
-    const prontos = itens.filter(it => it.jobId && ['auto','conferir','ok','erro'].includes(it.estado));
-    if (!prontos.length){ alert('Aguarde a análise dos vídeos ou adicione algum.'); return; }
-    const semLegenda = prontos.filter(it => !it.legenda.trim());
-    if (semLegenda.length && !confirm(`${semLegenda.length} vídeo(s) sem legenda serão pulados. Continuar?`)) return;
+    const prontos = itens.filter(
+      it =>
+        it.jobId &&
+        ['auto','conferir','ok','erro'].includes(it.estado)
+    );
 
-    const fila = prontos.filter(it => it.legenda.trim());
-    btnGerar.disabled=true; btnLimpar.disabled=true;
+    if (!prontos.length){
+      alert(
+        'Aguarde a análise dos vídeos ou adicione algum.'
+      );
+      return;
+    }
+
+    const semLegenda = prontos.filter(
+      it => !it.legenda.trim()
+    );
+
+    if (
+      semLegenda.length &&
+      !confirm(
+        `${semLegenda.length} vídeo(s) sem legenda ` +
+        `serão pulados. Continuar?`
+      )
+    ){
+      return;
+    }
+
+    const fila = prontos.filter(
+      it => it.legenda.trim()
+    );
+
+    if (!fila.length){
+      return;
+    }
+
+    btnGerar.disabled = true;
+    btnLimpar.disabled = true;
     btnZip.classList.remove('mostrar');
-    barraGeral.classList.add('mostrar'); resumo.classList.add('mostrar');
+    barraGeral.classList.add('mostrar');
+    resumo.classList.add('mostrar');
+    preenche.style.width = '0%';
 
-    const perfilSel = document.getElementById('seletorPerfil').value;
-    const edicoesExtras = document.getElementById('chkEdicoesExtras').checked;
-    const usarLogo = document.getElementById('chkUsarLogo').checked;
-    let feitos=0, ok=0, falhas=0; const ids=[];
-    for (const it of fila){
-      it.estado='processando'; render();
-      resumo.textContent=`Gerando ${feitos+1} de ${fila.length}...`;
+    const perfilSel =
+      document.getElementById('seletorPerfil').value;
+
+    const edicoesExtras =
+      document.getElementById('chkEdicoesExtras').checked;
+
+    const usarLogo =
+      document.getElementById('chkUsarLogo').checked;
+
+    // UMA única consulta antes do lote.
+    // Na V7 essa checagem acontecia de novo em cada vídeo.
+    const modoLote =
+      await consultarModoGeracaoDoLote();
+
+    const concorrencia = modoLote.local
+      ? Math.min(2, modoLote.concorrencia)
+      : 1;
+
+    let proximo = 0;
+    let feitos = 0;
+    let ok = 0;
+    let falhas = 0;
+    let ativos = 0;
+
+    const ids = [];
+    const mensagens = new Map();
+
+    function atualizarResumo(){
+      const modo = modoLote.local
+        ? `⚡ Turbo ${concorrencia}x`
+        : '☁️ Railway';
+
+      const partes = [
+        `${modo} • ${feitos}/${fila.length} concluído(s)`
+      ];
+
+      if (ativos > 0){
+        partes.push(`${ativos} processando`);
+      }
+
+      if (falhas > 0){
+        partes.push(`${falhas} falha(s)`);
+      }
+
+      resumo.textContent = partes.join(' • ');
+      preenche.style.width =
+        `${(feitos / fila.length) * 100}%`;
+    }
+
+    async function processarItem(it, indice){
+      ativos++;
+      it.estado = 'processando';
+      render();
+      atualizarResumo();
+
+      const payload = {
+        id: it.jobId,
+        legenda: it.legenda.trim(),
+        crop: it.box,
+        perfil: perfilSel,
+        uniqueness: {
+          edicoes_extras: edicoesExtras,
+          usar_logo: usarLogo
+        }
+      };
+
       try {
-        const payload = {
-          id: it.jobId,
-          legenda: it.legenda.trim(),
-          crop: it.box,
-          perfil: perfilSel,
-          uniqueness: {
-            edicoes_extras: edicoesExtras,
-            usar_logo: usarLogo
-          }
-        };
-        const resultadoGeracao = await gerarHibrido(payload, feitos + 1, fila.length);
-        it.estado='ok';
+        const resultadoGeracao =
+          await gerarHibridoTurbo(
+            payload,
+            modoLote.local,
+            mensagem => {
+              mensagens.set(it.localId, mensagem);
+
+              // Mostra a atualização mais recente sem interromper
+              // o contador geral do lote.
+              resumo.textContent =
+                `${mensagem} ` +
+                `(${feitos}/${fila.length} concluído(s) • ` +
+                `${ativos} processando)`;
+            }
+          );
+
+        it.estado = 'ok';
         it.modoGeracao = resultadoGeracao.modo;
+
         ok++;
         ids.push(it.jobId);
-      } catch(err){ it.estado='erro'; it.msgErro=err.message; falhas++; }
-      feitos++; preenche.style.width=(feitos/fila.length*100)+'%'; render();
+
+      } catch (err){
+        it.estado = 'erro';
+        it.msgErro = err.message;
+        falhas++;
+
+      } finally {
+        mensagens.delete(it.localId);
+        ativos--;
+        feitos++;
+        render();
+        atualizarResumo();
+      }
     }
-    resumo.textContent=`Concluído: ${ok} pronto(s)`+(falhas?`, ${falhas} falhou(aram)`:'.')+'.';
-    btnGerar.disabled=false; btnLimpar.disabled=false;
+
+    async function worker(){
+      while (true){
+        const indice = proximo++;
+        if (indice >= fila.length){
+          return;
+        }
+
+        await processarItem(
+          fila[indice],
+          indice
+        );
+      }
+    }
+
+    // Dois workers locais:
+    // enquanto um vídeo está subindo para o Railway,
+    // o outro já pode estar sendo renderizado.
+    const workers = Array.from(
+      {length: concorrencia},
+      () => worker()
+    );
+
+    await Promise.all(workers);
+
+    resumo.textContent =
+      `Concluído: ${ok} pronto(s)` +
+      (falhas
+        ? `, ${falhas} falhou(aram).`
+        : '.') +
+      (modoLote.local && concorrencia > 1
+        ? ' • Turbo 2x'
+        : '');
+
+    btnGerar.disabled = false;
+    btnLimpar.disabled = false;
 
     if (ids.length){
       btnZip.classList.add('mostrar');
+
       btnZip.onclick = async e => {
         e.preventDefault();
-        btnZip.textContent='Baixando...';
-        // Baixa cada vídeo separadamente, com um pequeno intervalo entre eles
-        // para o navegador não bloquear os downloads em sequência.
+        btnZip.textContent = 'Baixando...';
+
         for (const id of ids){
-          const a=document.createElement('a');
-          a.href='/baixar/'+id;
-          a.download='';
+          const a = document.createElement('a');
+          a.href = '/baixar/' + id;
+          a.download = '';
           document.body.appendChild(a);
           a.click();
           a.remove();
-          await new Promise(r => setTimeout(r, 800));
+
+          await new Promise(
+            r => setTimeout(r, 800)
+          );
         }
-        btnZip.textContent='⬇ Baixar todos';
+
+        btnZip.textContent = '⬇ Baixar todos';
       };
     }
   });
+
 </script>
 </body>
 </html>
