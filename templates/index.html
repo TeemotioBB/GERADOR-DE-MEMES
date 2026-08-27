@@ -99,6 +99,46 @@
     box-shadow:0 18px 42px rgba(48,68,92,.14);
   }
 
+  /* ---- Automação da aba de Reels ---- */
+  .automacao-reels{
+    margin-bottom:14px;
+    background:linear-gradient(180deg,#f0f8f5,#e8f4ef);
+    border:1px solid #bdd8cd;
+    border-radius:15px;
+    padding:16px;
+  }
+  .automacao-cabecalho{
+    display:flex;align-items:flex-start;justify-content:space-between;
+    gap:12px;margin-bottom:12px;
+  }
+  .automacao-titulo{font-size:17px;font-weight:800;letter-spacing:-.2px;}
+  .automacao-subtitulo{
+    font-size:12px;color:var(--cinza);margin-top:3px;line-height:1.4;
+  }
+  .automacao-controles{
+    display:grid;grid-template-columns:120px 1fr;gap:10px;align-items:end;
+  }
+  .automacao-qtd label{
+    display:block;font-size:11px;font-weight:750;color:var(--cinza);margin-bottom:5px;
+  }
+  .automacao-qtd input{
+    width:100%;border:1px solid var(--borda);border-radius:11px;
+    padding:11px 12px;font-size:15px;font-weight:700;background:#f8fbff;
+    color:var(--tinta);
+  }
+  .btn-rodar{
+    width:100%;border:1.5px solid #49a37d;border-radius:12px;padding:12px 16px;
+    background:#dff3e9;color:#16704e;font-size:15px;font-weight:850;
+    font-family:inherit;cursor:pointer;transition:.15s transform,.15s background;
+  }
+  .btn-rodar:hover{background:#d0ecdf;transform:translateY(-1px);}
+  .btn-rodar:disabled{opacity:.55;cursor:not-allowed;transform:none;}
+  .automacao-status{
+    font-size:12px;color:var(--cinza);margin-top:10px;min-height:18px;line-height:1.4;
+  }
+  .automacao-status.erro{color:var(--erro);}
+  .automacao-status.ok{color:var(--ok);font-weight:650;}
+
   /* ---- Importar pelo link ---- */
   .importar-link{
     margin-bottom:6px;
@@ -357,6 +397,30 @@
   </div>
 
   <div class="card">
+    <div class="automacao-reels">
+      <div class="automacao-cabecalho">
+        <div>
+          <div class="automacao-titulo">🤖 Minha aba de Reels</div>
+          <div class="automacao-subtitulo">
+            Abre o Instagram, coleta os links e importa os Reels automaticamente para o gerador.
+          </div>
+        </div>
+        <span class="limite-badge">automático</span>
+      </div>
+
+      <div class="automacao-controles">
+        <div class="automacao-qtd">
+          <label for="qtdReels">QUANTIDADE</label>
+          <input id="qtdReels" type="number" min="1" max="100" value="10">
+        </div>
+        <button class="btn-rodar" id="btnRodar" type="button">▶ Rodar</button>
+      </div>
+
+      <div class="automacao-status" id="statusAutomacao">
+        Escolha a quantidade e clique em Rodar. A coleta e a importação serão automáticas.
+      </div>
+    </div>
+
     <div class="importar-link">
       <div class="importar-cabecalho">
         <div>
@@ -404,6 +468,11 @@ https://www.instagram.com/reel/..."></textarea>
   const inputInstagram = document.getElementById('inputInstagram');
   const btnImportar = document.getElementById('btnImportar');
   const statusImportar = document.getElementById('statusImportar');
+  const btnRodar = document.getElementById('btnRodar');
+  const qtdReels = document.getElementById('qtdReels');
+  const statusAutomacao = document.getElementById('statusAutomacao');
+
+  let timerAutomacao = null;
 
   let itens = [];
   let proximoId = 1;
@@ -422,7 +491,98 @@ https://www.instagram.com/reel/..."></textarea>
   seletorPerfil.addEventListener('change', atualizarSub);
   atualizarSub();
 
+  btnRodar.addEventListener('click', iniciarAutomacaoReels);
   btnImportar.addEventListener('click', importarInstagram);
+
+  async function iniciarAutomacaoReels(){
+    let quantidade = parseInt(qtdReels.value || '10', 10);
+    if (!Number.isFinite(quantidade)) quantidade = 10;
+    quantidade = Math.max(1, Math.min(100, quantidade));
+    qtdReels.value = quantidade;
+
+    btnRodar.disabled = true;
+    qtdReels.disabled = true;
+    statusAutomacao.className = 'automacao-status';
+    statusAutomacao.textContent = 'Preparando a automação...';
+
+    try {
+      const resp = await fetch('/automacao-reels/iniciar', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({quantidade})
+      });
+
+      const dados = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(dados.erro || 'Não foi possível iniciar.');
+
+      acompanharAutomacaoReels();
+    } catch (err) {
+      btnRodar.disabled = false;
+      qtdReels.disabled = false;
+      statusAutomacao.className = 'automacao-status erro';
+      statusAutomacao.textContent = err.message || 'Falha ao iniciar.';
+    }
+  }
+
+  async function acompanharAutomacaoReels(){
+    if (timerAutomacao) clearTimeout(timerAutomacao);
+
+    try {
+      const resp = await fetch('/automacao-reels/status', {cache:'no-store'});
+      const dados = await resp.json();
+
+      statusAutomacao.textContent = dados.mensagem || 'Coletando...';
+
+      if (dados.estado === 'erro'){
+        statusAutomacao.className = 'automacao-status erro';
+        btnRodar.disabled = false;
+        qtdReels.disabled = false;
+        return;
+      }
+
+      if (dados.estado === 'concluido'){
+        statusAutomacao.className = 'automacao-status ok';
+
+        const links = Array.isArray(dados.links) ? dados.links : [];
+        if (!links.length){
+          statusAutomacao.textContent = 'A coleta terminou, mas nenhum link foi encontrado.';
+          btnRodar.disabled = false;
+          qtdReels.disabled = false;
+          return;
+        }
+
+        inputInstagram.value = links.join('\n');
+        statusAutomacao.textContent =
+          `Coleta concluída: ${links.length} link(s). Importando automaticamente...`;
+        statusImportar.textContent =
+          `Preparando importação automática de ${links.length} Reels...`;
+        statusImportar.className = 'importar-status';
+
+        try {
+          await importarInstagram();
+          statusAutomacao.textContent =
+            `Pronto: coleta finalizada e ${links.length} Reel(s) enviados para análise.`;
+          statusAutomacao.className = 'automacao-status ok';
+        } catch (err) {
+          statusAutomacao.textContent =
+            'A coleta terminou, mas houve um erro durante a importação automática.';
+          statusAutomacao.className = 'automacao-status erro';
+        }
+
+        btnRodar.disabled = false;
+        qtdReels.disabled = false;
+        return;
+      }
+
+      statusAutomacao.className = 'automacao-status';
+      timerAutomacao = setTimeout(acompanharAutomacaoReels, 1200);
+    } catch (err) {
+      statusAutomacao.className = 'automacao-status erro';
+      statusAutomacao.textContent = 'Perdi a conexão com o servidor local.';
+      btnRodar.disabled = false;
+      qtdReels.disabled = false;
+    }
+  }
 
   function extrairLinksInstagram(texto){
     const encontrados = texto.match(/https?:\/\/(?:www\.)?instagram\.com\/(?:reel|reels|p)\/[^\s<>"]+/gi) || [];
@@ -440,8 +600,8 @@ https://www.instagram.com/reel/..."></textarea>
       return;
     }
 
-    if (links.length > 10){
-      statusImportar.textContent = `Você colou ${links.length} links. O limite é 10 por vez.`;
+    if (links.length > 100){
+      statusImportar.textContent = `Você colou ${links.length} links. O limite é 100 por vez.`;
       statusImportar.className = 'importar-status erro';
       inputInstagram.focus();
       return;
@@ -506,7 +666,7 @@ https://www.instagram.com/reel/..."></textarea>
     inputInstagram.value = '';
     statusImportar.textContent = falhas
       ? `${sucessos} vídeo(s) importado(s) e ${falhas} com erro.`
-      : `${sucessos} vídeo(s) importado(s) com sucesso.`;
+      : `${sucessos} vídeo(s) importado(s) com sucesso. As legendas estão sendo lidas automaticamente.`;
     statusImportar.className = falhas ? 'importar-status erro' : 'importar-status';
     btnImportar.disabled = false;
     inputInstagram.disabled = false;
