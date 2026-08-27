@@ -19,7 +19,6 @@ from werkzeug.utils import secure_filename
 import meme_maker
 import detector
 import instagram_import
-import reels_collector
 import cv2
 import base64
 
@@ -47,70 +46,61 @@ GERACAO_LOCK = threading.Lock()
 # o servidor caso existam duas abas ou dois usuários simultâneos.
 ANALISE_LOCK = threading.Lock()
 
-# ----------------- AUTOMAÇÃO LOCAL DA ABA DE REELS -----------------
-COLETA_LOCK = threading.Lock()
-COLETA_STATUS_LOCK = threading.Lock()
-COLETA_STATUS = {
+# ----------------- AUTOMAÇÃO REMOTA DA ABA DE REELS -----------------
+# O Railway guarda apenas a tarefa e os links coletados.
+# Um pequeno agente no PC do usuário abre o Chrome localmente, coleta os Reels
+# e devolve os links para estas rotas autenticadas.
+AUTOMACAO_TOKEN = os.environ.get("AUTOMACAO_TOKEN", "").strip()
+
+AUTOMACAO_LOCK = threading.Lock()
+AUTOMACAO_STATUS = {
     "rodando": False,
     "estado": "parado",
     "mensagem": "Pronto para começar.",
+    "job_id": None,
     "quantidade": 0,
     "encontrados": 0,
     "links": [],
     "erro": None,
+    "agente_ultimo_ping": 0.0,
+    "agente_nome": None,
 }
 
 
-def _esta_no_railway():
-    return bool(
-        os.environ.get("RAILWAY_ENVIRONMENT")
-        or os.environ.get("RAILWAY_PROJECT_ID")
-        or os.environ.get("RAILWAY_SERVICE_ID")
-    )
+def _token_recebido():
+    bearer = (request.headers.get("Authorization") or "").strip()
+    if bearer.lower().startswith("bearer "):
+        return bearer[7:].strip()
+    return (request.headers.get("X-Automacao-Key") or "").strip()
 
 
-def _atualizar_coleta(**campos):
-    with COLETA_STATUS_LOCK:
-        COLETA_STATUS.update(campos)
-
-
-def _snapshot_coleta():
-    with COLETA_STATUS_LOCK:
-        return dict(COLETA_STATUS)
-
-
-def _executar_coleta_reels(quantidade):
-    try:
-        def progresso(estado, mensagem, encontrados=0):
-            _atualizar_coleta(
-                rodando=True,
-                estado=estado,
-                mensagem=mensagem,
-                encontrados=encontrados,
-                erro=None,
-            )
-
-        with COLETA_LOCK:
-            links = reels_collector.coletar(
-                quantidade=quantidade,
-                callback=progresso,
-            )
-
-        _atualizar_coleta(
-            rodando=False,
-            estado="concluido",
-            mensagem=f"Concluído: {len(links)} Reel(s) coletado(s).",
-            encontrados=len(links),
-            links=links,
-            erro=None,
+def _autorizar_automacao():
+    if not AUTOMACAO_TOKEN:
+        return False, (
+            "A variável AUTOMACAO_TOKEN não está configurada no Railway."
         )
-    except Exception as e:
-        _atualizar_coleta(
-            rodando=False,
-            estado="erro",
-            mensagem=f"Falha na coleta: {e}",
-            erro=str(e),
-        )
+    if _token_recebido() != AUTOMACAO_TOKEN:
+        return False, "Chave da automação inválida."
+    return True, None
+
+
+def _agente_online_locked():
+    ultimo = float(AUTOMACAO_STATUS.get("agente_ultimo_ping") or 0)
+    return (time.time() - ultimo) <= 20
+
+
+def _snapshot_automacao():
+    with AUTOMACAO_LOCK:
+        dados = dict(AUTOMACAO_STATUS)
+        dados["agente_online"] = _agente_online_locked()
+        # Nunca devolve dados sensíveis.
+        dados.pop("agente_ultimo_ping", None)
+        return dados
+
+
+def _atualizar_automacao(**campos):
+    with AUTOMACAO_LOCK:
+        AUTOMACAO_STATUS.update(campos)
 
 
 # A chave fica somente no servidor/Railway e nunca é enviada ao navegador.
@@ -141,53 +131,201 @@ def health():
 
 @app.route("/automacao-reels/iniciar", methods=["POST"])
 def iniciar_automacao_reels():
-    if _esta_no_railway():
-        return jsonify({
-            "erro": (
-                "A coleta da sua aba personalizada precisa rodar no seu computador. "
-                "Abra a versão local pelo iniciar_windows.bat."
-            )
-        }), 400
-
-    atual = _snapshot_coleta()
-    if atual.get("rodando"):
-        return jsonify({"erro": "Já existe uma coleta em andamento."}), 409
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
 
     dados = request.get_json(silent=True) or {}
-
     try:
         quantidade = int(dados.get("quantidade", 10))
     except (TypeError, ValueError):
         quantidade = 10
-
     quantidade = max(1, min(quantidade, 100))
 
-    _atualizar_coleta(
-        rodando=True,
-        estado="iniciando",
-        mensagem="Preparando o navegador...",
-        quantidade=quantidade,
-        encontrados=0,
-        links=[],
-        erro=None,
-    )
+    with AUTOMACAO_LOCK:
+        if not _agente_online_locked():
+            return jsonify({
+                "erro": (
+                    "O agente do seu computador está offline. "
+                    "Abra INICIAR_AGENTE.bat no PC e tente novamente."
+                )
+            }), 503
 
-    threading.Thread(
-        target=_executar_coleta_reels,
-        args=(quantidade,),
-        daemon=True,
-    ).start()
+        if AUTOMACAO_STATUS.get("rodando"):
+            return jsonify({"erro": "Já existe uma coleta em andamento."}), 409
+
+        job_id = uuid.uuid4().hex
+        AUTOMACAO_STATUS.update({
+            "rodando": True,
+            "estado": "aguardando_agente",
+            "mensagem": "Tarefa enviada. Aguardando o PC começar a coleta...",
+            "job_id": job_id,
+            "quantidade": quantidade,
+            "encontrados": 0,
+            "links": [],
+            "erro": None,
+        })
 
     return jsonify({
         "ok": True,
-        "mensagem": "Coleta iniciada.",
+        "job_id": job_id,
         "quantidade": quantidade,
+        "mensagem": "Tarefa enviada ao agente do PC.",
     })
 
 
 @app.route("/automacao-reels/status")
 def status_automacao_reels():
-    return jsonify(_snapshot_coleta())
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+    return jsonify(_snapshot_automacao())
+
+
+@app.route("/agente/heartbeat", methods=["POST"])
+def agente_heartbeat():
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    dados = request.get_json(silent=True) or {}
+    nome = (dados.get("nome") or "PC").strip()[:80]
+
+    with AUTOMACAO_LOCK:
+        AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
+        AUTOMACAO_STATUS["agente_nome"] = nome
+
+    return jsonify({"ok": True})
+
+
+@app.route("/agente/tarefa")
+def agente_tarefa():
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    with AUTOMACAO_LOCK:
+        AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
+
+        if (
+            AUTOMACAO_STATUS.get("rodando")
+            and AUTOMACAO_STATUS.get("estado") == "aguardando_agente"
+        ):
+            AUTOMACAO_STATUS["estado"] = "coletando"
+            AUTOMACAO_STATUS["mensagem"] = (
+                "PC conectado. Abrindo sua aba de Reels..."
+            )
+            return jsonify({
+                "tem_tarefa": True,
+                "job_id": AUTOMACAO_STATUS["job_id"],
+                "quantidade": AUTOMACAO_STATUS["quantidade"],
+            })
+
+    return jsonify({"tem_tarefa": False})
+
+
+@app.route("/agente/progresso", methods=["POST"])
+def agente_progresso():
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    dados = request.get_json(silent=True) or {}
+    job_id = dados.get("job_id")
+    estado = (dados.get("estado") or "coletando").strip()[:50]
+    mensagem = (dados.get("mensagem") or "Coletando...").strip()[:500]
+    try:
+        encontrados = int(dados.get("encontrados", 0))
+    except (TypeError, ValueError):
+        encontrados = 0
+
+    with AUTOMACAO_LOCK:
+        AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
+
+        if job_id != AUTOMACAO_STATUS.get("job_id"):
+            return jsonify({"erro": "Essa tarefa não é mais a tarefa atual."}), 409
+
+        if not AUTOMACAO_STATUS.get("rodando"):
+            return jsonify({"erro": "Não existe coleta ativa."}), 409
+
+        AUTOMACAO_STATUS.update({
+            "estado": estado,
+            "mensagem": mensagem,
+            "encontrados": max(0, encontrados),
+            "erro": None,
+        })
+
+    return jsonify({"ok": True})
+
+
+@app.route("/agente/concluir", methods=["POST"])
+def agente_concluir():
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    dados = request.get_json(silent=True) or {}
+    job_id = dados.get("job_id")
+    links = dados.get("links") or []
+
+    if not isinstance(links, list):
+        return jsonify({"erro": "Formato de links inválido."}), 400
+
+    links_limpos = []
+    vistos = set()
+    for link in links[:100]:
+        if not isinstance(link, str):
+            continue
+        link = link.strip()
+        if not link or link in vistos:
+            continue
+        if not link.startswith(("https://www.instagram.com/reel/", "https://instagram.com/reel/")):
+            continue
+        vistos.add(link)
+        links_limpos.append(link)
+
+    with AUTOMACAO_LOCK:
+        AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
+
+        if job_id != AUTOMACAO_STATUS.get("job_id"):
+            return jsonify({"erro": "Essa tarefa não é mais a tarefa atual."}), 409
+
+        AUTOMACAO_STATUS.update({
+            "rodando": False,
+            "estado": "concluido",
+            "mensagem": f"Concluído: {len(links_limpos)} Reel(s) coletado(s).",
+            "encontrados": len(links_limpos),
+            "links": links_limpos,
+            "erro": None,
+        })
+
+    return jsonify({"ok": True, "quantidade": len(links_limpos)})
+
+
+@app.route("/agente/erro", methods=["POST"])
+def agente_erro():
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    dados = request.get_json(silent=True) or {}
+    job_id = dados.get("job_id")
+    mensagem = (dados.get("erro") or "Falha desconhecida no agente.").strip()[:1000]
+
+    with AUTOMACAO_LOCK:
+        AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
+
+        if job_id != AUTOMACAO_STATUS.get("job_id"):
+            return jsonify({"erro": "Essa tarefa não é mais a tarefa atual."}), 409
+
+        AUTOMACAO_STATUS.update({
+            "rodando": False,
+            "estado": "erro",
+            "mensagem": f"Falha na coleta: {mensagem}",
+            "erro": mensagem,
+        })
+
+    return jsonify({"ok": True})
 
 
 @app.errorhandler(413)
