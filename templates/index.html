@@ -118,6 +118,18 @@
   .automacao-controles{
     display:grid;grid-template-columns:120px 1fr;gap:10px;align-items:end;
   }
+  .automacao-chave{margin-bottom:10px;}
+  .automacao-chave label{
+    display:block;font-size:11px;font-weight:750;color:var(--cinza);margin-bottom:5px;
+  }
+  .automacao-chave input{
+    width:100%;border:1px solid var(--borda);border-radius:11px;
+    padding:10px 12px;font-size:14px;background:#f8fbff;color:var(--tinta);
+  }
+  .automacao-agente{
+    margin-bottom:10px;font-size:12px;color:var(--cinza);line-height:1.4;
+    padding:8px 10px;border-radius:10px;background:rgba(255,255,255,.58);
+  }
   .automacao-qtd label{
     display:block;font-size:11px;font-weight:750;color:var(--cinza);margin-bottom:5px;
   }
@@ -402,10 +414,20 @@
         <div>
           <div class="automacao-titulo">🤖 Minha aba de Reels</div>
           <div class="automacao-subtitulo">
-            Abre o Instagram, coleta os links e importa os Reels automaticamente para o gerador.
+            Envia a tarefa para o seu PC. O Chrome local coleta os Reels e devolve os links para este site.
           </div>
         </div>
         <span class="limite-badge">automático</span>
+      </div>
+
+      <div class="automacao-chave">
+        <label for="chaveAutomacao">CHAVE DA AUTOMAÇÃO</label>
+        <input id="chaveAutomacao" type="password" autocomplete="off"
+               placeholder="Cole a mesma chave configurada no Railway">
+      </div>
+
+      <div class="automacao-agente" id="statusAgente">
+        ⚪ Informe a chave para verificar o PC.
       </div>
 
       <div class="automacao-controles">
@@ -417,7 +439,7 @@
       </div>
 
       <div class="automacao-status" id="statusAutomacao">
-        Escolha a quantidade e clique em Rodar. A coleta e a importação serão automáticas.
+        Com o agente do PC online, você pode iniciar daqui ou pelo celular.
       </div>
     </div>
 
@@ -427,7 +449,7 @@
           <div class="importar-titulo">🔗 Importar Reels</div>
           <div class="importar-subtitulo">Cole um link por linha. A importação acontece em fila.</div>
         </div>
-        <span class="limite-badge">até 10</span>
+        <span class="limite-badge">até 100</span>
       </div>
       <div class="importar-linha">
         <textarea id="inputInstagram" inputmode="url" autocomplete="off"
@@ -471,8 +493,23 @@ https://www.instagram.com/reel/..."></textarea>
   const btnRodar = document.getElementById('btnRodar');
   const qtdReels = document.getElementById('qtdReels');
   const statusAutomacao = document.getElementById('statusAutomacao');
+  const chaveAutomacao = document.getElementById('chaveAutomacao');
+  const statusAgente = document.getElementById('statusAgente');
 
   let timerAutomacao = null;
+  let timerAgente = null;
+  let jobIdAutomacaoAtual = null;
+
+  try {
+    chaveAutomacao.value = localStorage.getItem('automacao_reels_key_v1') || '';
+  } catch (_) {}
+
+  chaveAutomacao.addEventListener('change', () => {
+    try {
+      localStorage.setItem('automacao_reels_key_v1', chaveAutomacao.value.trim());
+    } catch (_) {}
+    verificarAgente();
+  });
 
   let itens = [];
   let proximoId = 1;
@@ -494,19 +531,88 @@ https://www.instagram.com/reel/..."></textarea>
   btnRodar.addEventListener('click', iniciarAutomacaoReels);
   btnImportar.addEventListener('click', importarInstagram);
 
+  function chaveDaAutomacao(){
+    return (chaveAutomacao.value || '').trim();
+  }
+
+  async function fetchAutomacao(url, options={}){
+    const chave = chaveDaAutomacao();
+    if (!chave) throw new Error('Informe a chave da automação.');
+
+    const headers = new Headers(options.headers || {});
+    headers.set('X-Automacao-Key', chave);
+
+    return fetch(url, {...options, headers, cache:'no-store'});
+  }
+
+  async function verificarAgente(){
+    if (timerAgente) clearTimeout(timerAgente);
+
+    if (!chaveDaAutomacao()){
+      statusAgente.textContent = '⚪ Informe a chave para verificar o PC.';
+      timerAgente = setTimeout(verificarAgente, 5000);
+      return;
+    }
+
+    try {
+      const resp = await fetchAutomacao('/automacao-reels/status');
+      const dados = await resp.json().catch(() => ({}));
+
+      if (!resp.ok){
+        statusAgente.textContent = '🔴 ' + (dados.erro || 'Chave inválida.');
+        timerAgente = setTimeout(verificarAgente, 5000);
+        return;
+      }
+
+      if (dados.agente_online){
+        const nome = dados.agente_nome ? ` (${dados.agente_nome})` : '';
+        statusAgente.textContent = `🟢 Agente do PC conectado${nome}`;
+      } else {
+        statusAgente.textContent =
+          '🔴 Agente do PC offline — abra INICIAR_AGENTE.bat no computador.';
+      }
+
+      // Se a página foi recarregada depois de uma coleta pronta, recupera os links
+      // sem importar automaticamente duas vezes.
+      if (!jobIdAutomacaoAtual && dados.estado === 'concluido' && Array.isArray(dados.links) && dados.links.length){
+        if (!inputInstagram.value.trim()){
+          inputInstagram.value = dados.links.join('\n');
+          statusImportar.textContent =
+            `${dados.links.length} link(s) recuperado(s). Clique em Importar Reels para usar.`;
+          statusImportar.className = 'importar-status';
+        }
+      }
+    } catch (_) {
+      statusAgente.textContent = '🔴 Não foi possível verificar o agente.';
+    }
+
+    timerAgente = setTimeout(verificarAgente, 5000);
+  }
+
   async function iniciarAutomacaoReels(){
     let quantidade = parseInt(qtdReels.value || '10', 10);
     if (!Number.isFinite(quantidade)) quantidade = 10;
     quantidade = Math.max(1, Math.min(100, quantidade));
     qtdReels.value = quantidade;
 
+    if (!chaveDaAutomacao()){
+      statusAutomacao.className = 'automacao-status erro';
+      statusAutomacao.textContent = 'Informe a chave da automação primeiro.';
+      chaveAutomacao.focus();
+      return;
+    }
+
+    try {
+      localStorage.setItem('automacao_reels_key_v1', chaveDaAutomacao());
+    } catch (_) {}
+
     btnRodar.disabled = true;
     qtdReels.disabled = true;
     statusAutomacao.className = 'automacao-status';
-    statusAutomacao.textContent = 'Preparando a automação...';
+    statusAutomacao.textContent = 'Enviando tarefa para o seu PC...';
 
     try {
-      const resp = await fetch('/automacao-reels/iniciar', {
+      const resp = await fetchAutomacao('/automacao-reels/iniciar', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({quantidade})
@@ -515,12 +621,14 @@ https://www.instagram.com/reel/..."></textarea>
       const dados = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(dados.erro || 'Não foi possível iniciar.');
 
+      jobIdAutomacaoAtual = dados.job_id || null;
       acompanharAutomacaoReels();
     } catch (err) {
       btnRodar.disabled = false;
       qtdReels.disabled = false;
       statusAutomacao.className = 'automacao-status erro';
       statusAutomacao.textContent = err.message || 'Falha ao iniciar.';
+      verificarAgente();
     }
   }
 
@@ -528,8 +636,9 @@ https://www.instagram.com/reel/..."></textarea>
     if (timerAutomacao) clearTimeout(timerAutomacao);
 
     try {
-      const resp = await fetch('/automacao-reels/status', {cache:'no-store'});
-      const dados = await resp.json();
+      const resp = await fetchAutomacao('/automacao-reels/status');
+      const dados = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(dados.erro || 'Falha ao acompanhar a coleta.');
 
       statusAutomacao.textContent = dados.mensagem || 'Coletando...';
 
@@ -537,6 +646,7 @@ https://www.instagram.com/reel/..."></textarea>
         statusAutomacao.className = 'automacao-status erro';
         btnRodar.disabled = false;
         qtdReels.disabled = false;
+        jobIdAutomacaoAtual = null;
         return;
       }
 
@@ -548,6 +658,7 @@ https://www.instagram.com/reel/..."></textarea>
           statusAutomacao.textContent = 'A coleta terminou, mas nenhum link foi encontrado.';
           btnRodar.disabled = false;
           qtdReels.disabled = false;
+          jobIdAutomacaoAtual = null;
           return;
         }
 
@@ -561,9 +672,9 @@ https://www.instagram.com/reel/..."></textarea>
         try {
           await importarInstagram();
           statusAutomacao.textContent =
-            `Pronto: coleta finalizada e ${links.length} Reel(s) enviados para análise.`;
+            `Pronto: ${links.length} Reel(s) coletado(s) e enviados para análise.`;
           statusAutomacao.className = 'automacao-status ok';
-        } catch (err) {
+        } catch (_) {
           statusAutomacao.textContent =
             'A coleta terminou, mas houve um erro durante a importação automática.';
           statusAutomacao.className = 'automacao-status erro';
@@ -571,6 +682,8 @@ https://www.instagram.com/reel/..."></textarea>
 
         btnRodar.disabled = false;
         qtdReels.disabled = false;
+        jobIdAutomacaoAtual = null;
+        verificarAgente();
         return;
       }
 
@@ -578,11 +691,14 @@ https://www.instagram.com/reel/..."></textarea>
       timerAutomacao = setTimeout(acompanharAutomacaoReels, 1200);
     } catch (err) {
       statusAutomacao.className = 'automacao-status erro';
-      statusAutomacao.textContent = 'Perdi a conexão com o servidor local.';
+      statusAutomacao.textContent = err.message || 'Perdi a conexão com o servidor.';
       btnRodar.disabled = false;
       qtdReels.disabled = false;
+      jobIdAutomacaoAtual = null;
     }
   }
+
+  verificarAgente();
 
   function extrairLinksInstagram(texto){
     const encontrados = texto.match(/https?:\/\/(?:www\.)?instagram\.com\/(?:reel|reels|p)\/[^\s<>"]+/gi) || [];
