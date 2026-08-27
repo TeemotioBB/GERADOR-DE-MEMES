@@ -13,6 +13,7 @@ import time
 import json
 import urllib.request
 import urllib.error
+import hashlib
 from flask import Flask, request, send_file, render_template, jsonify
 from werkzeug.utils import secure_filename
 
@@ -68,7 +69,40 @@ AUTOMACAO_STATUS = {
     "erro": None,
     "agente_ultimo_ping": 0.0,
     "agente_nome": None,
+    "capacidades": {},
 }
+
+
+# Fila de renderização local. Se o PC estiver disponível e tiver FFmpeg,
+# o site usa o agente; caso contrário, a interface cai automaticamente
+# para a rota /gerar do Railway.
+GERACAO_PC_LOCK = threading.Lock()
+GERACAO_PC_FILA = []
+GERACAO_PC_STATUS = {}
+COLETA_STALE_SECONDS = int(os.environ.get("COLETA_STALE_SECONDS", "120"))
+
+
+def _agente_pode_gerar_locked():
+    caps = AUTOMACAO_STATUS.get("capacidades") or {}
+    return _agente_online_locked() and bool(caps.get("geracao_local"))
+
+
+def _liberar_coleta_abandonada_locked():
+    """Libera coleta presa quando o agente sumiu por tempo suficiente."""
+    if not AUTOMACAO_STATUS.get("rodando"):
+        return False
+
+    ultimo = float(AUTOMACAO_STATUS.get("agente_ultimo_ping") or 0)
+    if ultimo and (time.time() - ultimo) <= COLETA_STALE_SECONDS:
+        return False
+
+    AUTOMACAO_STATUS.update({
+        "rodando": False,
+        "estado": "cancelado",
+        "mensagem": "Coleta anterior liberada automaticamente porque o agente ficou offline.",
+        "erro": None,
+    })
+    return True
 
 
 def _token_recebido():
@@ -95,8 +129,10 @@ def _agente_online_locked():
 
 def _snapshot_automacao():
     with AUTOMACAO_LOCK:
+        _liberar_coleta_abandonada_locked()
         dados = dict(AUTOMACAO_STATUS)
         dados["agente_online"] = _agente_online_locked()
+        dados["geracao_local_disponivel"] = _agente_pode_gerar_locked()
 
         # Os itens podem conter frames em base64. Não devolvemos tudo no /status
         # a cada 1 segundo; a interface busca incrementalmente em /itens.
@@ -155,6 +191,8 @@ def iniciar_automacao_reels():
     filtro_padrao = bool(dados.get("filtro_padrao", False))
 
     with AUTOMACAO_LOCK:
+        _liberar_coleta_abandonada_locked()
+
         if not _agente_online_locked():
             return jsonify({
                 "erro": (
@@ -198,6 +236,24 @@ def status_automacao_reels():
     return jsonify(_snapshot_automacao())
 
 
+@app.route("/automacao-reels/cancelar", methods=["POST"])
+def cancelar_automacao_reels():
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    with AUTOMACAO_LOCK:
+        estava_rodando = bool(AUTOMACAO_STATUS.get("rodando"))
+        AUTOMACAO_STATUS.update({
+            "rodando": False,
+            "estado": "cancelado",
+            "mensagem": "Coleta cancelada. Você já pode iniciar outra.",
+            "erro": None,
+        })
+
+    return jsonify({"ok": True, "estava_rodando": estava_rodando})
+
+
 @app.route("/automacao-reels/itens")
 def itens_automacao_reels():
     autorizado, erro = _autorizar_automacao()
@@ -233,10 +289,12 @@ def agente_heartbeat():
 
     dados = request.get_json(silent=True) or {}
     nome = (dados.get("nome") or "PC").strip()[:80]
+    capacidades = dados.get("capacidades") if isinstance(dados.get("capacidades"), dict) else {}
 
     with AUTOMACAO_LOCK:
         AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
         AUTOMACAO_STATUS["agente_nome"] = nome
+        AUTOMACAO_STATUS["capacidades"] = capacidades
 
     return jsonify({"ok": True})
 
@@ -250,16 +308,36 @@ def agente_tarefa():
     with AUTOMACAO_LOCK:
         AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
 
+    # Renderizações individuais têm prioridade para o botão Gerar todos
+    # continuar responsivo mesmo quando o agente também é usado para coleta.
+    with GERACAO_PC_LOCK:
+        while GERACAO_PC_FILA:
+            task_id = GERACAO_PC_FILA.pop(0)
+            tarefa = GERACAO_PC_STATUS.get(task_id)
+            if not tarefa or tarefa.get("estado") != "aguardando_agente":
+                continue
+
+            tarefa["estado"] = "processando_pc"
+            tarefa["mensagem"] = "PC recebeu a tarefa de renderização."
+            tarefa["atualizado_em"] = time.time()
+            return jsonify({
+                "tem_tarefa": True,
+                "tipo": "geracao",
+                "task_id": task_id,
+                "dados": tarefa["dados"],
+            })
+
+    with AUTOMACAO_LOCK:
+        _liberar_coleta_abandonada_locked()
         if (
             AUTOMACAO_STATUS.get("rodando")
             and AUTOMACAO_STATUS.get("estado") == "aguardando_agente"
         ):
             AUTOMACAO_STATUS["estado"] = "coletando"
-            AUTOMACAO_STATUS["mensagem"] = (
-                "PC conectado. Abrindo sua aba de Reels..."
-            )
+            AUTOMACAO_STATUS["mensagem"] = "PC conectado. Abrindo sua aba de Reels..."
             return jsonify({
                 "tem_tarefa": True,
+                "tipo": "coleta",
                 "job_id": AUTOMACAO_STATUS["job_id"],
                 "quantidade": AUTOMACAO_STATUS["quantidade"],
                 "filtro_padrao": bool(AUTOMACAO_STATUS.get("filtro_padrao", False)),
@@ -725,6 +803,250 @@ def ler_legenda():
         return jsonify({"erro": "O Claude não retornou uma legenda."}), 502
 
     return jsonify({"texto": texto})
+
+
+# ----------------- GERAÇÃO HÍBRIDA: PC QUANDO DISPONÍVEL -----------------
+
+def _runtime_manifest_local():
+    base = os.path.dirname(os.path.abspath(__file__))
+    candidatos = [
+        "meme_maker.py",
+        "avatar.png", "avatar2.png", "avatar3.png",
+        "logo_adultosofrido.png",
+    ]
+
+    fonte_dir = os.path.join(base, "fontes")
+    if os.path.isdir(fonte_dir):
+        for raiz, _dirs, arquivos in os.walk(fonte_dir):
+            for nome in arquivos:
+                if nome.lower().endswith((".ttf", ".otf")):
+                    rel = os.path.relpath(os.path.join(raiz, nome), base)
+                    candidatos.append(rel)
+
+    itens = []
+    vistos = set()
+    for rel in candidatos:
+        rel = rel.replace("\\", "/").lstrip("/")
+        if rel in vistos:
+            continue
+        vistos.add(rel)
+        caminho = os.path.abspath(os.path.join(base, rel))
+        if not caminho.startswith(os.path.abspath(base) + os.sep):
+            continue
+        if not os.path.isfile(caminho):
+            continue
+        h = hashlib.sha256()
+        with open(caminho, "rb") as f:
+            for bloco in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(bloco)
+        itens.append({
+            "path": rel,
+            "size": os.path.getsize(caminho),
+            "sha256": h.hexdigest(),
+        })
+    return itens
+
+
+@app.route("/agente/runtime/manifest")
+def agente_runtime_manifest():
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+    return jsonify({"arquivos": _runtime_manifest_local()})
+
+
+@app.route("/agente/runtime/<path:rel>")
+def agente_runtime_arquivo(rel):
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    permitido = {item["path"] for item in _runtime_manifest_local()}
+    rel = rel.replace("\\", "/").lstrip("/")
+    if rel not in permitido:
+        return jsonify({"erro": "Arquivo de runtime não permitido."}), 404
+
+    base = os.path.dirname(os.path.abspath(__file__))
+    caminho = os.path.join(base, rel)
+    return send_file(caminho, as_attachment=True, download_name=os.path.basename(rel))
+
+
+@app.route("/agente/fonte/<job_id>")
+def agente_fonte(job_id):
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    item = UPLOADS.get(job_id)
+    if not item or not os.path.exists(item["path"]):
+        return jsonify({"erro": "Vídeo fonte expirado ou inexistente."}), 404
+
+    return send_file(
+        item["path"],
+        as_attachment=True,
+        download_name=item.get("nome") or f"{job_id}.mp4",
+    )
+
+
+@app.route("/gerar-hibrido", methods=["POST"])
+def gerar_hibrido():
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    dados = request.get_json(silent=True) or {}
+    job_id = dados.get("id")
+    legenda = (dados.get("legenda") or "").strip()
+
+    item = UPLOADS.get(job_id)
+    if not item or not os.path.exists(item["path"]):
+        return jsonify({"erro": "Vídeo expirado. Adicione novamente."}), 404
+    if not legenda:
+        return jsonify({"erro": "Digite uma legenda."}), 400
+
+    with AUTOMACAO_LOCK:
+        usar_pc = _agente_pode_gerar_locked()
+
+    if not usar_pc:
+        return jsonify({
+            "modo": "railway",
+            "mensagem": "PC indisponível para renderização; use o Railway.",
+        })
+
+    task_id = uuid.uuid4().hex
+    agora = time.time()
+    with GERACAO_PC_LOCK:
+        GERACAO_PC_STATUS[task_id] = {
+            "task_id": task_id,
+            "job_id": job_id,
+            "estado": "aguardando_agente",
+            "mensagem": "Aguardando o PC iniciar a renderização...",
+            "erro": None,
+            "criado_em": agora,
+            "atualizado_em": agora,
+            "dados": {
+                "id": job_id,
+                "legenda": legenda,
+                "crop": dados.get("crop"),
+                "perfil": dados.get("perfil"),
+                "uniqueness": dados.get("uniqueness") or {},
+                "nome": item.get("nome") or "video.mp4",
+            },
+        }
+        GERACAO_PC_FILA.append(task_id)
+
+    return jsonify({
+        "modo": "pc",
+        "task_id": task_id,
+        "mensagem": "Renderização enviada ao PC.",
+    })
+
+
+@app.route("/geracao-hibrida/status/<task_id>")
+def geracao_hibrida_status(task_id):
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    with GERACAO_PC_LOCK:
+        tarefa = GERACAO_PC_STATUS.get(task_id)
+        if not tarefa:
+            return jsonify({"erro": "Tarefa de geração não encontrada."}), 404
+        return jsonify({
+            "task_id": task_id,
+            "job_id": tarefa.get("job_id"),
+            "estado": tarefa.get("estado"),
+            "mensagem": tarefa.get("mensagem"),
+            "erro": tarefa.get("erro"),
+        })
+
+
+@app.route("/agente/geracao-progresso", methods=["POST"])
+def agente_geracao_progresso():
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    dados = request.get_json(silent=True) or {}
+    task_id = dados.get("task_id")
+    mensagem = str(dados.get("mensagem") or "Processando no PC...")[:500]
+
+    with AUTOMACAO_LOCK:
+        AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
+
+    with GERACAO_PC_LOCK:
+        tarefa = GERACAO_PC_STATUS.get(task_id)
+        if not tarefa:
+            return jsonify({"erro": "Tarefa inexistente."}), 404
+        tarefa["mensagem"] = mensagem
+        tarefa["estado"] = "processando_pc"
+        tarefa["atualizado_em"] = time.time()
+
+    return jsonify({"ok": True})
+
+
+@app.route("/agente/resultado-geracao", methods=["POST"])
+def agente_resultado_geracao():
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    task_id = (request.form.get("task_id") or "").strip()
+    if "video" not in request.files:
+        return jsonify({"erro": "Vídeo final não enviado."}), 400
+
+    with GERACAO_PC_LOCK:
+        tarefa = GERACAO_PC_STATUS.get(task_id)
+        if not tarefa:
+            return jsonify({"erro": "Tarefa inexistente."}), 404
+        job_id = tarefa.get("job_id")
+
+    item = UPLOADS.get(job_id)
+    if not item:
+        return jsonify({"erro": "Item original não encontrado."}), 404
+
+    saida = os.path.join(WORK_DIR, f"{job_id}_post_pc.mp4")
+    request.files["video"].save(saida)
+
+    base_nome = os.path.splitext(item.get("nome") or "video")[0]
+    nome_saida = f"post_{base_nome}.mp4"
+    RESULTS[job_id] = {"path": saida, "nome": nome_saida}
+    _limpar_depois([saida], delay=7200)
+
+    with AUTOMACAO_LOCK:
+        AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
+
+    with GERACAO_PC_LOCK:
+        tarefa = GERACAO_PC_STATUS.get(task_id)
+        if tarefa:
+            tarefa["estado"] = "concluido"
+            tarefa["mensagem"] = "Renderização concluída no PC."
+            tarefa["erro"] = None
+            tarefa["atualizado_em"] = time.time()
+
+    return jsonify({"ok": True, "id": job_id})
+
+
+@app.route("/agente/geracao-erro", methods=["POST"])
+def agente_geracao_erro():
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    dados = request.get_json(silent=True) or {}
+    task_id = dados.get("task_id")
+    mensagem = str(dados.get("erro") or "Falha na renderização local.")[:1000]
+
+    with GERACAO_PC_LOCK:
+        tarefa = GERACAO_PC_STATUS.get(task_id)
+        if not tarefa:
+            return jsonify({"erro": "Tarefa inexistente."}), 404
+        tarefa["estado"] = "erro"
+        tarefa["erro"] = mensagem
+        tarefa["mensagem"] = mensagem
+        tarefa["atualizado_em"] = time.time()
+
+    return jsonify({"ok": True})
 
 
 @app.route("/gerar", methods=["POST"])
