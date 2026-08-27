@@ -536,6 +536,10 @@ https://www.instagram.com/reel/..."></textarea>
   let jobIdAutomacaoAtual = null;
   let itensAgenteRecebidos = 0;
 
+  // Railway continua sendo o caminho padrão.
+  // O PC só entra quando o servidor confirma geração local disponível.
+  let geracaoLocalDisponivel = false;
+
   try {
     chaveAutomacao.value = localStorage.getItem('automacao_reels_key_v1') || '';
   } catch (_) {}
@@ -652,19 +656,25 @@ https://www.instagram.com/reel/..."></textarea>
       const dados = await resp.json().catch(() => ({}));
 
       if (!resp.ok){
+        geracaoLocalDisponivel = false;
         statusAgente.textContent = '🔴 ' + (dados.erro || 'Chave inválida.');
         timerAgente = setTimeout(verificarAgente, 5000);
         return;
       }
 
+      geracaoLocalDisponivel = Boolean(
+        dados.agente_online && dados.geracao_local_disponivel
+      );
+
       if (dados.agente_online){
         const nome = dados.agente_nome ? ` (${dados.agente_nome})` : '';
-        statusAgente.textContent = dados.geracao_local_disponivel
+        statusAgente.textContent = geracaoLocalDisponivel
           ? `🟢 Agente conectado${nome} • ⚡ geração econômica no PC`
           : `🟢 Agente conectado${nome} • coleta local • geração pelo Railway`;
       } else {
+        geracaoLocalDisponivel = false;
         statusAgente.textContent =
-          '🔴 Agente do PC offline — abra INICIAR_AGENTE.bat no computador.';
+          '🔴 Agente do PC offline • geração continua pelo Railway.';
       }
 
       // Recupera itens já enviados pelo PC, inclusive após recarregar a página.
@@ -679,7 +689,9 @@ https://www.instagram.com/reel/..."></textarea>
         } catch (_) {}
       }
     } catch (_) {
-      statusAgente.textContent = '🔴 Não foi possível verificar o agente.';
+      geracaoLocalDisponivel = false;
+      statusAgente.textContent =
+        '🔴 Não foi possível verificar o agente • geração pelo Railway.';
     }
 
     timerAgente = setTimeout(verificarAgente, 5000);
@@ -1340,9 +1352,44 @@ https://www.instagram.com/reel/..."></textarea>
     throw new Error('A geração no PC excedeu o tempo limite.');
   }
 
+  async function confirmarGeracaoLocalDisponivel(){
+    // Sem chave ou com agente já marcado como offline:
+    // não passa pela camada híbrida; usa a rota original do Railway.
+    if (!chaveDaAutomacao() || !geracaoLocalDisponivel){
+      return false;
+    }
+
+    // Confere novamente logo antes de gerar.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3500);
+
+    try {
+      const resp = await fetchAutomacao('/automacao-reels/status', {
+        signal: controller.signal
+      });
+      const dados = await resp.json().catch(() => ({}));
+
+      geracaoLocalDisponivel = Boolean(
+        resp.ok &&
+        dados.agente_online &&
+        dados.geracao_local_disponivel
+      );
+
+      return geracaoLocalDisponivel;
+    } catch (_) {
+      geracaoLocalDisponivel = false;
+      return false;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   async function gerarHibrido(payload, indice, total){
-    // Sem chave, usa Railway normalmente. Nada fica dependente do agente.
-    if (!chaveDaAutomacao()){
+    // A geração do Railway é o fallback e também o caminho padrão.
+    const podeUsarPC = await confirmarGeracaoLocalDisponivel();
+
+    if (!podeUsarPC){
+      resumo.textContent = `☁️ Gerando no Railway (${indice}/${total})...`;
       return gerarNoRailway(payload);
     }
 
@@ -1352,27 +1399,37 @@ https://www.instagram.com/reel/..."></textarea>
         headers:{'Content-Type':'application/json'},
         body:JSON.stringify(payload)
       });
+
       const dados = await resp.json().catch(() => ({}));
 
-      if (!resp.ok){
-        // Qualquer problema de comunicação com o modo econômico não bloqueia o usuário.
-        return gerarNoRailway(payload);
-      }
-
-      if (dados.modo !== 'pc' || !dados.task_id){
-        resumo.textContent = `PC indisponível • gerando no Railway (${indice}/${total})...`;
+      // Se o PC deixou de estar disponível entre o status e a criação
+      // da tarefa, volta imediatamente para /gerar.
+      if (!resp.ok || dados.modo !== 'pc' || !dados.task_id){
+        geracaoLocalDisponivel = false;
+        resumo.textContent =
+          `☁️ PC indisponível • gerando no Railway (${indice}/${total})...`;
         return gerarNoRailway(payload);
       }
 
       try {
         resumo.textContent = `⚡ Gerando no PC (${indice}/${total})...`;
-        return await aguardarGeracaoPC(dados.task_id, payload, indice, total);
-      } catch (erroLocal) {
-        // Fallback automático: PC desligou, FFmpeg faltou, asset falhou, etc.
-        resumo.textContent = `PC não concluiu • continuando no Railway (${indice}/${total})...`;
+        return await aguardarGeracaoPC(
+          dados.task_id,
+          payload,
+          indice,
+          total
+        );
+      } catch (_) {
+        // Se o agente cair no meio, não bloqueia o usuário.
+        geracaoLocalDisponivel = false;
+        resumo.textContent =
+          `☁️ PC não concluiu • continuando no Railway (${indice}/${total})...`;
         return gerarNoRailway(payload);
       }
+
     } catch (_) {
+      geracaoLocalDisponivel = false;
+      resumo.textContent = `☁️ Gerando no Railway (${indice}/${total})...`;
       return gerarNoRailway(payload);
     }
   }
