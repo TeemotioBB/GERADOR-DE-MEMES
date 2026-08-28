@@ -438,7 +438,7 @@
         <div>
           <div class="automacao-titulo">🤖 Minha aba de Reels</div>
           <div class="automacao-subtitulo">
-            Seu PC coleta, filtra e baixa os Reels. Depois envia os vídeos prontos para análise no Railway.
+            Seu PC coleta, filtra, baixa e analisa os Reels. O Railway recebe só o preview e os dados do recorte.
           </div>
         </div>
         <span class="limite-badge">automático</span>
@@ -536,8 +536,8 @@ https://www.instagram.com/reel/..."></textarea>
   let jobIdAutomacaoAtual = null;
   let itensAgenteRecebidos = 0;
 
-  // Railway continua sendo o caminho padrão.
-  // O PC só entra quando o servidor confirma geração local disponível.
+  // Para vídeos manuais pequenos, Railway continua como fallback.
+  // Reels automáticos e lotes grandes ficam no PC para economizar Railway.
   let geracaoLocalDisponivel = false;
   let geracaoLocalParalela = 1;
 
@@ -621,7 +621,8 @@ https://www.instagram.com/reel/..."></textarea>
           frame: j.frame || null,
           box: j.box || null,
           conf: Number(j.confianca) || 0,
-          origemAgente: true
+          origemAgente: true,
+          localOnly: Boolean(j.local_only)
         };
 
         itens.push(it);
@@ -686,7 +687,7 @@ https://www.instagram.com/reel/..."></textarea>
         geracaoLocalDisponivel = false;
         geracaoLocalParalela = 1;
         statusAgente.textContent =
-          '🔴 Agente do PC offline • geração continua pelo Railway.';
+          '🔴 Agente offline • lotes grandes aguardam o PC; vídeos manuais pequenos podem usar Railway.';
       }
 
       // Recupera itens já enviados pelo PC, inclusive após recarregar a página.
@@ -703,7 +704,7 @@ https://www.instagram.com/reel/..."></textarea>
     } catch (_) {
       geracaoLocalDisponivel = false;
       statusAgente.textContent =
-        '🔴 Não foi possível verificar o agente • geração pelo Railway.';
+        '🔴 Não foi possível verificar o agente.';
     }
 
     timerAgente = setTimeout(verificarAgente, 5000);
@@ -820,7 +821,7 @@ https://www.instagram.com/reel/..."></textarea>
           : 'automacao-status ok';
 
         statusAutomacao.textContent =
-          `Pronto: ${prontos} vídeo(s) baixado(s) pelo PC e analisado(s) no Railway` +
+          `Pronto: ${prontos} vídeo(s) baixado(s) e analisado(s) no PC` +
           (falhas ? ` • ${falhas} falhou(aram).` : '.');
 
         statusImportar.textContent =
@@ -1351,9 +1352,16 @@ https://www.instagram.com/reel/..."></textarea>
   }
 
 
-  async function aguardarGeracaoPC(taskId, payload, onProgress){
+  async function aguardarGeracaoPC(
+    taskId,
+    payload,
+    onProgress,
+    esperaLonga=false
+  ){
     const inicio = Date.now();
-    const limiteMs = 20 * 60 * 1000;
+    const limiteMs = esperaLonga
+      ? 12 * 60 * 60 * 1000
+      : 20 * 60 * 1000;
 
     while (Date.now() - inicio < limiteMs){
       await new Promise(r => setTimeout(r, 850));
@@ -1393,7 +1401,6 @@ https://www.instagram.com/reel/..."></textarea>
 
 
   async function consultarModoGeracaoDoLote(){
-    // Railway é sempre o fallback seguro.
     if (!chaveDaAutomacao()){
       return {
         local:false,
@@ -1418,11 +1425,7 @@ https://www.instagram.com/reel/..."></textarea>
       if (!resp.ok){
         geracaoLocalDisponivel = false;
         geracaoLocalParalela = 1;
-
-        return {
-          local:false,
-          concorrencia:1
-        };
+        return {local:false, concorrencia:1};
       }
 
       geracaoLocalDisponivel = Boolean(
@@ -1450,11 +1453,7 @@ https://www.instagram.com/reel/..."></textarea>
     } catch (_){
       geracaoLocalDisponivel = false;
       geracaoLocalParalela = 1;
-
-      return {
-        local:false,
-        concorrencia:1
-      };
+      return {local:false, concorrencia:1};
 
     } finally {
       clearTimeout(timeout);
@@ -1462,72 +1461,143 @@ https://www.instagram.com/reel/..."></textarea>
   }
 
 
+  async function aguardarAgenteParaLote(onProgress){
+    const inicio = Date.now();
+    const limiteMs = 12 * 60 * 60 * 1000;
+
+    while (Date.now() - inicio < limiteMs){
+      const modo = await consultarModoGeracaoDoLote();
+      if (modo.local){
+        return modo;
+      }
+
+      if (onProgress){
+        onProgress(
+          '⏸ Lote econômico pausado • aguardando o agente do PC...'
+        );
+      }
+
+      await new Promise(r => setTimeout(r, 5000));
+    }
+
+    throw new Error(
+      'O agente não reconectou dentro do limite de 12 horas.'
+    );
+  }
+
+
   async function gerarHibridoTurbo(
     payload,
     tentarPC,
-    onProgress
+    onProgress,
+    opcoes={}
   ){
+    const permitirFallback = opcoes.permitirFallback !== false;
+    const esperaLonga = Boolean(opcoes.esperaLonga);
+
     if (!tentarPC){
-      if (onProgress){
-        onProgress('☁️ Gerando no Railway...');
+      if (!permitirFallback){
+        await aguardarAgenteParaLote(onProgress);
+        tentarPC = true;
+      } else {
+        if (onProgress){
+          onProgress('☁️ Gerando no Railway...');
+        }
+        return gerarNoRailway(payload);
       }
-      return gerarNoRailway(payload);
     }
 
-    try {
-      // O próprio servidor confirma se o agente continua online.
-      const resp = await fetchAutomacao(
-        '/gerar-hibrido',
-        {
-          method:'POST',
-          headers:{'Content-Type':'application/json'},
-          body:JSON.stringify(payload)
-        }
-      );
-
-      const dados = await resp.json().catch(() => ({}));
-
-      // Agente caiu entre o início do lote e este vídeo.
-      // Não bloqueia nada: vai direto ao Railway.
-      if (
-        !resp.ok ||
-        dados.modo !== 'pc' ||
-        !dados.task_id
-      ){
-        if (onProgress){
-          onProgress(
-            '☁️ PC indisponível • gerando no Railway...'
-          );
-        }
-
-        return gerarNoRailway(payload);
-      }
-
+    while (true){
       try {
-        return await aguardarGeracaoPC(
-          dados.task_id,
-          payload,
-          onProgress
+        const resp = await fetchAutomacao(
+          '/gerar-hibrido',
+          {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify(payload)
+          }
         );
 
-      } catch (_){
-        // Uma falha local não mata o lote nem desativa o modo
-        // econômico dos próximos vídeos.
-        if (onProgress){
-          onProgress(
-            '☁️ PC não concluiu • continuando no Railway...'
-          );
+        const dados = await resp.json().catch(() => ({}));
+
+        // Reels automáticos da V9 existem somente no PC.
+        // Em lote grande também proibimos fallback para Railway para evitar
+        // que uma queda do agente gere dezenas de renders pagos no servidor.
+        if (
+          dados.aguardar_pc ||
+          dados.modo === 'aguardar_pc'
+        ){
+          if (onProgress){
+            onProgress(
+              '⏸ PC desconectado • lote preservado • aguardando reconexão...'
+            );
+          }
+          await aguardarAgenteParaLote(onProgress);
+          continue;
         }
 
+        if (
+          !resp.ok ||
+          dados.modo !== 'pc' ||
+          !dados.task_id
+        ){
+          if (!permitirFallback){
+            if (onProgress){
+              onProgress(
+                '⏸ Railway bloqueado para este lote • aguardando PC...'
+              );
+            }
+            await aguardarAgenteParaLote(onProgress);
+            continue;
+          }
+
+          if (onProgress){
+            onProgress(
+              '☁️ PC indisponível • gerando no Railway...'
+            );
+          }
+          return gerarNoRailway(payload);
+        }
+
+        try {
+          return await aguardarGeracaoPC(
+            dados.task_id,
+            payload,
+            onProgress,
+            esperaLonga
+          );
+
+        } catch (err){
+          if (!permitirFallback){
+            // Erro real do FFmpeg/arquivo: não transferimos automaticamente
+            // 100 renders para Railway. O item é marcado para conferência.
+            throw err;
+          }
+
+          if (onProgress){
+            onProgress(
+              '☁️ PC não concluiu • continuando no Railway...'
+            );
+          }
+          return gerarNoRailway(payload);
+        }
+
+      } catch (err){
+        if (!permitirFallback){
+          // Erro de rede/offline: aguarda. Erro explícito de renderização
+          // vindo do status deve subir para o item como falha.
+          if (/renderiza|ffmpeg|arquivo|fonte|falhou/i.test(err.message || '')){
+            throw err;
+          }
+          await aguardarAgenteParaLote(onProgress);
+          continue;
+        }
+
+        if (onProgress){
+          onProgress('☁️ Gerando no Railway...');
+        }
         return gerarNoRailway(payload);
       }
-
-    } catch (_){
-      if (onProgress){
-        onProgress('☁️ Gerando no Railway...');
-      }
-
-      return gerarNoRailway(payload);
     }
   }
 
@@ -1584,10 +1654,27 @@ https://www.instagram.com/reel/..."></textarea>
     const usarLogo =
       document.getElementById('chkUsarLogo').checked;
 
-    // UMA única consulta antes do lote.
-    // Na V7 essa checagem acontecia de novo em cada vídeo.
-    const modoLote =
+    const temFonteSomentePC = fila.some(
+      it => Boolean(it.localOnly)
+    );
+    const loteGrande = fila.length >= 20;
+
+    // V9: lotes grandes nunca caem automaticamente para Railway.
+    // Isso evita uma queda do agente transformar 100 renders locais em
+    // 100 renders de CPU no servidor.
+    const modoEconomicoObrigatorio =
+      temFonteSomentePC || loteGrande;
+
+    let modoLote =
       await consultarModoGeracaoDoLote();
+
+    if (modoEconomicoObrigatorio && !modoLote.local){
+      resumo.textContent =
+        '⏸ Lote econômico • aguardando o agente do PC...';
+      modoLote = await aguardarAgenteParaLote(
+        msg => resumo.textContent = msg
+      );
+    }
 
     const concorrencia = modoLote.local
       ? Math.min(2, modoLote.concorrencia)
@@ -1603,9 +1690,11 @@ https://www.instagram.com/reel/..."></textarea>
     const mensagens = new Map();
 
     function atualizarResumo(){
-      const modo = modoLote.local
-        ? `⚡ Turbo ${concorrencia}x`
-        : '☁️ Railway';
+      const modo = modoEconomicoObrigatorio
+        ? `💰 Lote econômico • ⚡ Turbo ${concorrencia}x`
+        : (modoLote.local
+            ? `⚡ Turbo ${concorrencia}x`
+            : '☁️ Railway');
 
       const partes = [
         `${modo} • ${feitos}/${fila.length} concluído(s)`
@@ -1638,7 +1727,8 @@ https://www.instagram.com/reel/..."></textarea>
         uniqueness: {
           edicoes_extras: edicoesExtras,
           usar_logo: usarLogo
-        }
+        },
+        local_only: Boolean(it.localOnly)
       };
 
       try {
@@ -1649,12 +1739,14 @@ https://www.instagram.com/reel/..."></textarea>
             mensagem => {
               mensagens.set(it.localId, mensagem);
 
-              // Mostra a atualização mais recente sem interromper
-              // o contador geral do lote.
               resumo.textContent =
                 `${mensagem} ` +
                 `(${feitos}/${fila.length} concluído(s) • ` +
                 `${ativos} processando)`;
+            },
+            {
+              permitirFallback: !modoEconomicoObrigatorio,
+              esperaLonga: modoEconomicoObrigatorio
             }
           );
 
@@ -1693,7 +1785,7 @@ https://www.instagram.com/reel/..."></textarea>
     }
 
     // Dois workers locais:
-    // enquanto um vídeo está subindo para o Railway,
+    // enquanto um vídeo final está sendo enviado,
     // o outro já pode estar sendo renderizado.
     const workers = Array.from(
       {length: concorrencia},
@@ -1707,9 +1799,11 @@ https://www.instagram.com/reel/..."></textarea>
       (falhas
         ? `, ${falhas} falhou(aram).`
         : '.') +
-      (modoLote.local && concorrencia > 1
-        ? ' • Turbo 2x'
-        : '');
+      (modoEconomicoObrigatorio
+        ? ' • 💰 sem render no Railway'
+        : (modoLote.local && concorrencia > 1
+            ? ' • Turbo 2x'
+            : ''));
 
     btnGerar.disabled = false;
     btnLimpar.disabled = false;
