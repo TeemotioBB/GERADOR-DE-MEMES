@@ -49,6 +49,11 @@ PERFIS = {
         "logo_opacity": 0.25,
         "logo_width": 130,   # largura em pixels dentro do card
     },
+    "adultasofrida": {
+        "nome": "Adulta Sofrida",
+        "handle": "@AdultaSofrida",
+        "avatar": os.path.join(_BASE, "avatar4.png"),
+    },
     "achadinhosofcs": {
         "nome": "achadinhosofcs",
         "handle": "@achadinhosofcs",
