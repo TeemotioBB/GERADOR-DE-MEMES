@@ -69,6 +69,7 @@ AUTOMACAO_STATUS = {
     "erro": None,
     "agente_ultimo_ping": 0.0,
     "agente_nome": None,
+    "agente_sessao": None,
     "capacidades": {},
 }
 
@@ -80,6 +81,34 @@ GERACAO_PC_LOCK = threading.Lock()
 GERACAO_PC_FILA = []
 GERACAO_PC_STATUS = {}
 COLETA_STALE_SECONDS = int(os.environ.get("COLETA_STALE_SECONDS", "120"))
+
+
+def _reencaminhar_geracoes_de_sessao_antiga(nova_sessao):
+    """
+    Se o agente foi fechado/reaberto, tarefas que estavam marcadas como
+    processando pertencem ao processo antigo. Recoloca na fila sem criar
+    uma segunda tarefa nem cobrar renderização no Railway.
+    """
+    if not nova_sessao:
+        return 0
+
+    reencaminhadas = 0
+    with GERACAO_PC_LOCK:
+        for task_id, tarefa in GERACAO_PC_STATUS.items():
+            if tarefa.get("estado") != "processando_pc":
+                continue
+            if tarefa.get("agente_sessao") == nova_sessao:
+                continue
+
+            tarefa["estado"] = "aguardando_agente"
+            tarefa["mensagem"] = "Agente reiniciado. Tarefa recolocada na fila."
+            tarefa["agente_sessao"] = None
+            tarefa["atualizado_em"] = time.time()
+            if task_id not in GERACAO_PC_FILA:
+                GERACAO_PC_FILA.append(task_id)
+            reencaminhadas += 1
+
+    return reencaminhadas
 
 
 def _agente_pode_gerar_locked():
@@ -140,8 +169,9 @@ def _snapshot_automacao():
         dados["itens_prontos"] = len(itens)
         dados.pop("itens", None)
 
-        # Nunca devolve dados sensíveis.
+        # Nunca devolve dados internos/sensíveis.
         dados.pop("agente_ultimo_ping", None)
+        dados.pop("agente_sessao", None)
         return dados
 
 
@@ -290,13 +320,21 @@ def agente_heartbeat():
     dados = request.get_json(silent=True) or {}
     nome = (dados.get("nome") or "PC").strip()[:80]
     capacidades = dados.get("capacidades") if isinstance(dados.get("capacidades"), dict) else {}
+    sessao = str(dados.get("sessao") or "").strip()[:120]
 
+    sessao_anterior = None
     with AUTOMACAO_LOCK:
+        sessao_anterior = AUTOMACAO_STATUS.get("agente_sessao")
         AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
         AUTOMACAO_STATUS["agente_nome"] = nome
+        AUTOMACAO_STATUS["agente_sessao"] = sessao or sessao_anterior
         AUTOMACAO_STATUS["capacidades"] = capacidades
 
-    return jsonify({"ok": True})
+    reencaminhadas = 0
+    if sessao and sessao_anterior and sessao != sessao_anterior:
+        reencaminhadas = _reencaminhar_geracoes_de_sessao_antiga(sessao)
+
+    return jsonify({"ok": True, "reencaminhadas": reencaminhadas})
 
 
 @app.route("/agente/tarefa")
@@ -307,6 +345,7 @@ def agente_tarefa():
 
     with AUTOMACAO_LOCK:
         AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
+        agente_sessao_atual = AUTOMACAO_STATUS.get("agente_sessao")
 
     # Renderizações individuais têm prioridade para o botão Gerar todos
     # continuar responsivo mesmo quando o agente também é usado para coleta.
@@ -319,6 +358,7 @@ def agente_tarefa():
 
             tarefa["estado"] = "processando_pc"
             tarefa["mensagem"] = "PC recebeu a tarefa de renderização."
+            tarefa["agente_sessao"] = agente_sessao_atual
             tarefa["atualizado_em"] = time.time()
             return jsonify({
                 "tem_tarefa": True,
@@ -430,9 +470,9 @@ def agente_concluir():
         prontos = len(AUTOMACAO_STATUS.get("itens") or [])
         total = int(AUTOMACAO_STATUS.get("quantidade") or 0)
 
-        mensagem = f"Concluído: {prontos}/{total} Reel(s) enviados e analisados."
+        mensagem = f"Concluído: {prontos}/{total} Reel(s) baixados e analisados no PC."
         if falhas_limpas:
-            mensagem += f" {len(falhas_limpas)} falhou(aram) no PC/envio."
+            mensagem += f" {len(falhas_limpas)} falhou(aram) no PC/registro."
 
         AUTOMACAO_STATUS.update({
             "rodando": False,
@@ -552,6 +592,96 @@ def _analisar_arquivo(entrada, nome_seguro, job_id):
         "frame": "data:image/jpeg;base64," + b64,
         "nome": nome_seguro,
     }
+
+
+@app.route("/agente/registrar-video-local", methods=["POST"])
+def agente_registrar_video_local():
+    """
+    V9: registra somente preview + medidas do Reel analisado no PC.
+
+    O MP4 original NÃO sobe para o Railway. Ele fica no cache local do agente
+    e será usado pelo FFmpeg do PC quando o usuário clicar em Gerar todos.
+    Isso reduz CPU, armazenamento temporário e tráfego de arquivos fonte no
+    Railway, especialmente em lotes de 100.
+    """
+    autorizado, erro = _autorizar_automacao()
+    if not autorizado:
+        return jsonify({"erro": erro}), 401
+
+    dados = request.get_json(silent=True) or {}
+    task_id = str(dados.get("job_id") or "").strip()
+    reel_url = str(dados.get("reel_url") or "").strip()[:1000]
+    nome_seguro = secure_filename(str(dados.get("nome") or "reel.mp4")) or "reel.mp4"
+
+    try:
+        largura = max(1, int(dados.get("largura") or 0))
+        altura = max(1, int(dados.get("altura") or 0))
+        confianca = float(dados.get("confianca") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"erro": "Metadados de vídeo inválidos."}), 400
+
+    box = dados.get("box") if isinstance(dados.get("box"), dict) else None
+    if not box or not all(k in box for k in ("x", "y", "w", "h")):
+        return jsonify({"erro": "Recorte do vídeo ausente."}), 400
+
+    try:
+        box = {
+            "x": int(box["x"]), "y": int(box["y"]),
+            "w": int(box["w"]), "h": int(box["h"]),
+        }
+    except (TypeError, ValueError):
+        return jsonify({"erro": "Recorte do vídeo inválido."}), 400
+
+    frame = str(dados.get("frame") or "")
+    if not frame.startswith("data:image/jpeg;base64,"):
+        return jsonify({"erro": "Preview JPEG ausente."}), 400
+    # Evita que um agente com bug coloque blobs enormes na RAM do Railway.
+    if len(frame) > 2_000_000:
+        return jsonify({"erro": "Preview grande demais."}), 413
+
+    with AUTOMACAO_LOCK:
+        AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
+
+        if task_id != AUTOMACAO_STATUS.get("job_id"):
+            return jsonify({"erro": "Essa tarefa não é mais a tarefa atual."}), 409
+        if not AUTOMACAO_STATUS.get("rodando"):
+            return jsonify({"erro": "Não existe coleta ativa."}), 409
+
+        # Retry idempotente pelo URL do Reel.
+        for existente in AUTOMACAO_STATUS.get("itens") or []:
+            if reel_url and existente.get("reel_url") == reel_url:
+                return jsonify(existente)
+
+        video_job_id = uuid.uuid4().hex
+        UPLOADS[video_job_id] = {
+            "path": None,
+            "nome": nome_seguro,
+            "local_only": True,
+            "reel_url": reel_url,
+        }
+
+        item = {
+            "id": video_job_id,
+            "largura": largura,
+            "altura": altura,
+            "box": box,
+            "confianca": round(max(0.0, min(confianca, 1.0)), 2),
+            "frame": frame,
+            "nome": nome_seguro,
+            "reel_url": reel_url,
+            "origem": "agente_pc_local",
+            "local_only": True,
+        }
+
+        AUTOMACAO_STATUS.setdefault("itens", []).append(item)
+        prontos = len(AUTOMACAO_STATUS["itens"])
+        total = int(AUTOMACAO_STATUS.get("quantidade") or 0)
+        AUTOMACAO_STATUS["mensagem"] = (
+            f"PC baixando/analisando • {prontos}/{total} pronto(s) • "
+            "originais ficam no PC"
+        )
+
+    return jsonify(item)
 
 
 @app.route("/agente/upload-video", methods=["POST"])
@@ -878,7 +1008,14 @@ def agente_fonte(job_id):
         return jsonify({"erro": erro}), 401
 
     item = UPLOADS.get(job_id)
-    if not item or not os.path.exists(item["path"]):
+    if not item:
+        return jsonify({"erro": "Vídeo fonte expirado ou inexistente."}), 404
+    if item.get("local_only"):
+        return jsonify({
+            "erro": "Este vídeo fonte está somente no cache do PC.",
+            "codigo": "FONTE_LOCAL"
+        }), 409
+    if not item.get("path") or not os.path.exists(item["path"]):
         return jsonify({"erro": "Vídeo fonte expirado ou inexistente."}), 404
 
     return send_file(
@@ -899,7 +1036,11 @@ def gerar_hibrido():
     legenda = (dados.get("legenda") or "").strip()
 
     item = UPLOADS.get(job_id)
-    if not item or not os.path.exists(item["path"]):
+    if not item:
+        return jsonify({"erro": "Vídeo expirado. Adicione novamente."}), 404
+
+    local_only = bool(item.get("local_only"))
+    if not local_only and (not item.get("path") or not os.path.exists(item["path"])):
         return jsonify({"erro": "Vídeo expirado. Adicione novamente."}), 404
     if not legenda:
         return jsonify({"erro": "Digite uma legenda."}), 400
@@ -908,6 +1049,13 @@ def gerar_hibrido():
         usar_pc = _agente_pode_gerar_locked()
 
     if not usar_pc:
+        if local_only:
+            return jsonify({
+                "modo": "aguardar_pc",
+                "aguardar_pc": True,
+                "obrigatorio_pc": True,
+                "mensagem": "Este Reel está no PC. Aguardando o agente reconectar.",
+            }), 503
         return jsonify({
             "modo": "railway",
             "mensagem": "PC indisponível para renderização; use o Railway.",
@@ -931,7 +1079,9 @@ def gerar_hibrido():
                 "perfil": dados.get("perfil"),
                 "uniqueness": dados.get("uniqueness") or {},
                 "nome": item.get("nome") or "video.mp4",
+                "local_only": local_only,
             },
+            "agente_sessao": None,
         }
         GERACAO_PC_FILA.append(task_id)
 
@@ -948,16 +1098,25 @@ def geracao_hibrida_status(task_id):
     if not autorizado:
         return jsonify({"erro": erro}), 401
 
+    with AUTOMACAO_LOCK:
+        agente_online = _agente_online_locked()
+
     with GERACAO_PC_LOCK:
         tarefa = GERACAO_PC_STATUS.get(task_id)
         if not tarefa:
             return jsonify({"erro": "Tarefa de geração não encontrada."}), 404
+
+        mensagem = tarefa.get("mensagem")
+        if tarefa.get("estado") == "processando_pc" and not agente_online:
+            mensagem = "⏸ Agente desconectado. O lote aguarda o PC reconectar."
+
         return jsonify({
             "task_id": task_id,
             "job_id": tarefa.get("job_id"),
             "estado": tarefa.get("estado"),
-            "mensagem": tarefa.get("mensagem"),
+            "mensagem": mensagem,
             "erro": tarefa.get("erro"),
+            "agente_online": agente_online,
         })
 
 
@@ -1080,7 +1239,14 @@ def gerar():
         }
 
     item = UPLOADS.get(job_id)
-    if not item or not os.path.exists(item["path"]):
+    if not item:
+        return jsonify({"erro": "Vídeo expirado. Adicione novamente."}), 404
+    if item.get("local_only"):
+        return jsonify({
+            "erro": "Este Reel fica somente no PC para economizar Railway. Ligue o agente para gerar.",
+            "codigo": "FONTE_LOCAL"
+        }), 409
+    if not item.get("path") or not os.path.exists(item["path"]):
         return jsonify({"erro": "Vídeo expirado. Adicione novamente."}), 404
     if not legenda:
         return jsonify({"erro": "Digite uma legenda."}), 400
