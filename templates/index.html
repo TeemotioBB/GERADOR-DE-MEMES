@@ -577,14 +577,123 @@ https://www.instagram.com/reel/..."></textarea>
     return (chaveAutomacao.value || '').trim();
   }
 
+  function esperar(ms){
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function fetchComTimeout(url, options={}, timeoutMs=10000){
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    // Se já veio um signal externo, respeita também esse cancelamento.
+    const signalExterno = options.signal;
+    let listenerExterno = null;
+
+    if (signalExterno){
+      if (signalExterno.aborted){
+        clearTimeout(timer);
+        controller.abort();
+      } else {
+        listenerExterno = () => controller.abort();
+        signalExterno.addEventListener(
+          'abort',
+          listenerExterno,
+          {once:true}
+        );
+      }
+    }
+
+    try {
+      return await fetch(
+        url,
+        {
+          ...options,
+          signal: controller.signal,
+          cache:'no-store',
+          credentials:'same-origin'
+        }
+      );
+    } finally {
+      clearTimeout(timer);
+
+      if (signalExterno && listenerExterno){
+        signalExterno.removeEventListener(
+          'abort',
+          listenerExterno
+        );
+      }
+    }
+  }
+
   async function fetchAutomacao(url, options={}){
     const chave = chaveDaAutomacao();
-    if (!chave) throw new Error('Informe a chave da automação.');
+
+    if (!chave){
+      throw new Error('Informe a chave da automação.');
+    }
 
     const headers = new Headers(options.headers || {});
     headers.set('X-Automacao-Key', chave);
 
-    return fetch(url, {...options, headers, cache:'no-store'});
+    let ultimoErro = null;
+
+    // Railway pode estar acordando/reiniciando após deploy.
+    // Faz até 3 tentativas somente quando existe falha DE REDE.
+    for (let tentativa = 1; tentativa <= 3; tentativa++){
+      try {
+        return await fetchComTimeout(
+          url,
+          {...options, headers},
+          10000
+        );
+      } catch (err){
+        ultimoErro = err;
+
+        if (tentativa < 3){
+          await esperar(tentativa * 900);
+        }
+      }
+    }
+
+    const erro = new Error(
+      'Não consegui conectar ao Railway. O servidor pode estar ' +
+      'reiniciando ou temporariamente indisponível.'
+    );
+    erro.causaOriginal = ultimoErro;
+    throw erro;
+  }
+
+  async function diagnosticarRailway(){
+    try {
+      const resp = await fetchComTimeout(
+        '/health',
+        {},
+        7000
+      );
+
+      if (resp.ok){
+        return {
+          online:true,
+          mensagem:
+            'O Railway respondeu, mas a rota da automação não respondeu. ' +
+            'Atualize a página com Ctrl+F5.'
+        };
+      }
+
+      return {
+        online:false,
+        mensagem:
+          `Railway respondeu HTTP ${resp.status}. ` +
+          'Confira o deploy/logs do serviço.'
+      };
+    } catch (_){
+      return {
+        online:false,
+        mensagem:
+          'O navegador não conseguiu alcançar o Railway. ' +
+          'Confira se o deploy está ONLINE e tente novamente em alguns segundos.'
+      };
+    }
   }
 
   async function sincronizarItensDoAgente(){
@@ -701,10 +810,17 @@ https://www.instagram.com/reel/..."></textarea>
           }
         } catch (_) {}
       }
-    } catch (_) {
+    } catch (err) {
       geracaoLocalDisponivel = false;
+      geracaoLocalParalela = 1;
+
       statusAgente.textContent =
-        '🔴 Não foi possível verificar o agente.';
+        '🟠 Verificando conexão com o Railway...';
+
+      const diag = await diagnosticarRailway();
+
+      statusAgente.textContent =
+        (diag.online ? '🟠 ' : '🔴 ') + diag.mensagem;
     }
 
     timerAgente = setTimeout(verificarAgente, 5000);
@@ -756,7 +872,21 @@ https://www.instagram.com/reel/..."></textarea>
       chkFiltroPadrao.disabled = false;
       btnCancelarAuto.style.display = 'none';
       statusAutomacao.className = 'automacao-status erro';
-      statusAutomacao.textContent = err.message || 'Falha ao iniciar.';
+
+      const mensagem = String(err?.message || '');
+
+      if (
+        mensagem.includes('Failed to fetch')
+        || mensagem.includes('Railway')
+        || err?.name === 'AbortError'
+      ){
+        const diag = await diagnosticarRailway();
+        statusAutomacao.textContent = diag.mensagem;
+      } else {
+        statusAutomacao.textContent =
+          mensagem || 'Falha ao iniciar.';
+      }
+
       verificarAgente();
     }
   }
