@@ -941,8 +941,8 @@ def _runtime_manifest_local():
     base = os.path.dirname(os.path.abspath(__file__))
     candidatos = [
         "meme_maker.py",
-        "avatar.png", "avatar2.png", "avatar3.png",
-        "logo_adultosofrido.png",
+        "avatar.png", "avatar2.png", "avatar3.png", "avatar4.png",
+        "logo_adultosofrido.png", "logo_adultasofrida.png",
     ]
 
     fonte_dir = os.path.join(base, "fontes")
