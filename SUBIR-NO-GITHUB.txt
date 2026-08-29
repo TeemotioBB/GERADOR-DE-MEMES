@@ -1,0 +1,35 @@
+PACOTE ECONÔMICO — GERADOR DE MEMES
+
+Arquivos ALTERADOS/NOVOS que precisam estar na raiz do repositório:
+- app.py
+- analysis_worker.py          (novo)
+- render_worker.py            (novo)
+- instagram_worker.py         (novo)
+- meme_maker.py               (mantém a correção da Adulta Sofrida)
+- detector.py
+- instagram_import.py
+- Procfile
+- requirements.txt
+
+Arquivos visuais incluídos para evitar desencontro de nomes:
+- avatar.png
+- avatar2.png
+- avatar3.png
+- avatar4.png
+- logo_adultosofrido.png
+- logo_adultasofrida.png
+
+A pasta templates/index.html também está incluída e pode substituir a atual.
+As fontes do seu repositório atual devem continuar na pasta fontes/ como já estão.
+
+ECONOMIAS IMPLEMENTADAS:
+1) OpenCV/Numpy rodam em processo curto e saem da RAM após a análise.
+2) Pillow/Pilmoji/meme_maker rodam em processo curto no fallback do Railway.
+3) yt-dlp/Instagram roda em processo curto e sai da RAM após o download.
+4) previews saem do Base64 em RAM e viram JPEG temporário no disco.
+5) uma única thread limpa arquivos; não existe mais uma thread por arquivo.
+6) o ZIP é montado no disco, não inteiro na RAM.
+7) metadados expirados são removidos dos dicionários do servidor.
+8) gc + malloc_trim devolvem memória livre ao Linux/Railway após tarefas pesadas.
+
+Nenhum botão/rota da interface foi removido.

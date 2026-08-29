@@ -4,7 +4,7 @@ Servidor web local do Gerador de Memes (Adulto Sofrido).
 """
 
 import os
-import io
+import sys
 import uuid
 import zipfile
 import tempfile
@@ -14,14 +14,15 @@ import json
 import urllib.request
 import urllib.error
 import hashlib
+import subprocess
+import heapq
+import itertools
+import gc
+import ctypes
+import binascii
+import base64
 from flask import Flask, request, send_file, render_template, jsonify
 from werkzeug.utils import secure_filename
-
-import meme_maker
-import detector
-import instagram_import
-import cv2
-import base64
 
 app = Flask(__name__)
 
@@ -34,6 +35,13 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_VIDEO_UPLOAD_BYTES
 
 WORK_DIR = os.path.join(tempfile.gettempdir(), "gerador_memes")
 os.makedirs(WORK_DIR, exist_ok=True)
+PREVIEW_DIR = os.path.join(WORK_DIR, "previews")
+os.makedirs(PREVIEW_DIR, exist_ok=True)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ANALYSIS_WORKER = os.path.join(BASE_DIR, "analysis_worker.py")
+RENDER_WORKER = os.path.join(BASE_DIR, "render_worker.py")
+INSTAGRAM_WORKER = os.path.join(BASE_DIR, "instagram_worker.py")
 
 RESULTS = {}
 UPLOADS = {}
@@ -185,15 +193,167 @@ CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "").strip()
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001").strip()
 
 
-def _limpar_depois(paths, delay=3600):
-    def job():
-        time.sleep(delay)
-        for p in paths:
+# ----------------- ECONOMIA DE RAM / LIMPEZA -----------------
+# Antes era criada UMA THREAD por arquivo para esperar 1-2 horas e apagá-lo.
+# Agora existe apenas uma thread de limpeza para o processo inteiro.
+_CLEANUP_COND = threading.Condition()
+_CLEANUP_HEAP = []
+_CLEANUP_SEQ = itertools.count()
+
+
+def _cleanup_loop():
+    while True:
+        with _CLEANUP_COND:
+            while not _CLEANUP_HEAP:
+                _CLEANUP_COND.wait()
+
+            quando, _seq, tarefa = _CLEANUP_HEAP[0]
+            espera = quando - time.time()
+            if espera > 0:
+                _CLEANUP_COND.wait(timeout=espera)
+                continue
+
+            heapq.heappop(_CLEANUP_HEAP)
+
+        for p in tarefa.get("paths", ()):
             try:
                 os.remove(p)
             except OSError:
                 pass
-    threading.Thread(target=job, daemon=True).start()
+
+        for job_id in tarefa.get("upload_ids", ()):
+            UPLOADS.pop(job_id, None)
+
+        for job_id in tarefa.get("result_ids", ()):
+            RESULTS.pop(job_id, None)
+
+        task_ids = tarefa.get("task_ids", ())
+        if task_ids:
+            with GERACAO_PC_LOCK:
+                for task_id in task_ids:
+                    GERACAO_PC_STATUS.pop(task_id, None)
+                    try:
+                        while task_id in GERACAO_PC_FILA:
+                            GERACAO_PC_FILA.remove(task_id)
+                    except ValueError:
+                        pass
+
+
+def _limpar_depois(paths=(), delay=3600, upload_ids=(), result_ids=(), task_ids=()):
+    tarefa = {
+        "paths": tuple(p for p in paths if p),
+        "upload_ids": tuple(upload_ids),
+        "result_ids": tuple(result_ids),
+        "task_ids": tuple(task_ids),
+    }
+    item = (time.time() + max(1, int(delay)), next(_CLEANUP_SEQ), tarefa)
+    with _CLEANUP_COND:
+        heapq.heappush(_CLEANUP_HEAP, item)
+        _CLEANUP_COND.notify()
+
+
+threading.Thread(target=_cleanup_loop, daemon=True, name="cleanup-gerador").start()
+
+
+def _liberar_memoria():
+    """Pede ao Python/glibc para devolver páginas livres ao Linux/Railway."""
+    try:
+        gc.collect()
+    except Exception:
+        pass
+
+    if os.name == "posix":
+        try:
+            libc = ctypes.CDLL(None)
+            malloc_trim = getattr(libc, "malloc_trim", None)
+            if malloc_trim is not None:
+                malloc_trim(0)
+        except Exception:
+            pass
+
+
+def _executar(cmd, timeout=None):
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        detalhe = (proc.stderr or proc.stdout or "").strip()[-3000:]
+        raise RuntimeError(detalhe or f"Comando terminou com código {proc.returncode}.")
+    return proc
+
+
+def _ffprobe_video(path):
+    proc = _executar([
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,duration:format=duration",
+        "-of", "json",
+        path,
+    ], timeout=60)
+    info = json.loads(proc.stdout or "{}")
+    streams = info.get("streams") or []
+    if not streams:
+        raise RuntimeError("O FFprobe não encontrou uma faixa de vídeo.")
+    stream = streams[0]
+    vw = int(stream.get("width") or 0)
+    vh = int(stream.get("height") or 0)
+    dur_raw = (info.get("format") or {}).get("duration") or stream.get("duration") or 0
+    dur = float(dur_raw or 0)
+    if vw <= 0 or vh <= 0:
+        raise RuntimeError("Não foi possível identificar o tamanho do vídeo.")
+    return vw, vh, max(0.0, dur)
+
+
+def _worker_json(worker_path, payload, timeout):
+    if not os.path.isfile(worker_path):
+        raise RuntimeError(f"Arquivo auxiliar ausente: {os.path.basename(worker_path)}")
+
+    fd, payload_path = tempfile.mkstemp(prefix="worker_", suffix=".json", dir=WORK_DIR)
+    os.close(fd)
+    try:
+        with open(payload_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+        proc = subprocess.run(
+            [sys.executable, worker_path, payload_path],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        saida = (proc.stdout or "").strip()
+        retorno = None
+        if saida:
+            try:
+                retorno = json.loads(saida.splitlines()[-1])
+            except Exception:
+                retorno = None
+
+        if proc.returncode != 0:
+            if isinstance(retorno, dict) and retorno.get("erro"):
+                raise RuntimeError(str(retorno["erro"]))
+            detalhe = (proc.stderr or saida or "").strip()[-3000:]
+            raise RuntimeError(detalhe or f"Worker terminou com código {proc.returncode}.")
+
+        if not isinstance(retorno, dict):
+            raise RuntimeError("O worker não retornou uma resposta válida.")
+        return retorno
+    finally:
+        try:
+            os.remove(payload_path)
+        except OSError:
+            pass
+        _liberar_memoria()
+
+
+def _preview_path(job_id):
+    return os.path.join(PREVIEW_DIR, f"{job_id}.jpg")
+
+
+def _preview_url(job_id):
+    return f"/frame/{job_id}"
 
 
 @app.route("/")
@@ -531,15 +691,14 @@ def _corpo_maior_que(limite_bytes):
 
 
 def _analisar_arquivo(entrada, nome_seguro, job_id):
-    """Executa a análise comum para upload manual e importação por URL."""
-    frame_path = os.path.join(WORK_DIR, f"{job_id}_frame.jpg")
+    """Analisa sem carregar OpenCV/Numpy/Pillow no processo web permanente."""
+    frame_path = _preview_path(job_id)
 
     try:
         with ANALISE_LOCK:
-            vw, vh = meme_maker.get_video_size(entrada)
-            dur = meme_maker.get_duration(entrada)
+            vw, vh, dur = _ffprobe_video(entrada)
 
-            meme_maker.run([
+            _executar([
                 "ffmpeg", "-y",
                 "-ss", f"{max(0.0, dur / 2):.2f}",
                 "-i", entrada,
@@ -547,62 +706,86 @@ def _analisar_arquivo(entrada, nome_seguro, job_id):
                 "-vf", "scale=720:-2:force_original_aspect_ratio=decrease",
                 "-q:v", "4",
                 frame_path,
-            ])
+            ], timeout=180)
 
-            img = cv2.imread(frame_path)
-            if img is None:
-                raise RuntimeError("O FFmpeg não conseguiu criar o frame de análise.")
+            analise = _worker_json(
+                ANALYSIS_WORKER,
+                {"frame_path": frame_path},
+                timeout=120,
+            )
 
-            frame_h, frame_w = img.shape[:2]
-            box_frame = detector.detectar_card(img)
-            conf = detector.confianca(img, box_frame)
+        frame_w = int(analise.get("frame_w") or 0)
+        frame_h = int(analise.get("frame_h") or 0)
+        box_frame = analise.get("box")
+        conf = float(analise.get("confianca") or 0.0)
 
-            if box_frame is None:
-                box = (
-                    int(vw * 0.08), int(vh * 0.30),
-                    int(vw * 0.84), int(vw * 0.84),
-                )
-                conf = 0.0
-            else:
-                escala_x = vw / frame_w
-                escala_y = vh / frame_h
-                x, y, bw, bh = box_frame
-                box = (
-                    int(round(x * escala_x)), int(round(y * escala_y)),
-                    int(round(bw * escala_x)), int(round(bh * escala_y)),
-                )
+        if frame_w <= 0 or frame_h <= 0:
+            raise RuntimeError("O worker de análise retornou dimensões inválidas.")
 
-            with open(frame_path, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode("ascii")
-    finally:
+        if not box_frame:
+            box = (
+                int(vw * 0.08), int(vh * 0.30),
+                int(vw * 0.84), int(vw * 0.84),
+            )
+            conf = 0.0
+        else:
+            escala_x = vw / frame_w
+            escala_y = vh / frame_h
+            x, y, bw, bh = [int(v) for v in box_frame]
+            box = (
+                int(round(x * escala_x)), int(round(y * escala_y)),
+                int(round(bw * escala_x)), int(round(bh * escala_y)),
+            )
+
+        UPLOADS[job_id] = {"path": entrada, "nome": nome_seguro}
+        # Mantém o mesmo prazo de 1h para o vídeo fonte, mas também remove o
+        # metadata da RAM quando ele expira.
+        _limpar_depois([entrada], delay=3600, upload_ids=[job_id])
+        # Preview é pequeno e fica no disco, não na RAM. 24h evita quebrar a
+        # miniatura se a página ficar aberta por bastante tempo.
+        _limpar_depois([frame_path], delay=86400)
+
+        return {
+            "id": job_id,
+            "largura": vw,
+            "altura": vh,
+            "box": {"x": box[0], "y": box[1], "w": box[2], "h": box[3]},
+            "confianca": round(max(0.0, min(conf, 1.0)), 2),
+            "frame": _preview_url(job_id),
+            "nome": nome_seguro,
+        }
+    except Exception:
         try:
             os.remove(frame_path)
         except OSError:
             pass
+        raise
+    finally:
+        _liberar_memoria()
 
-    UPLOADS[job_id] = {"path": entrada, "nome": nome_seguro}
-    _limpar_depois([entrada])
 
-    return {
-        "id": job_id,
-        "largura": vw,
-        "altura": vh,
-        "box": {"x": box[0], "y": box[1], "w": box[2], "h": box[3]},
-        "confianca": conf,
-        "frame": "data:image/jpeg;base64," + b64,
-        "nome": nome_seguro,
-    }
+@app.route("/frame/<job_id>")
+def frame_preview(job_id):
+    # job_id nasce de uuid.hex, então aceitamos apenas hex para impedir path traversal.
+    if len(job_id) != 32 or any(c not in "0123456789abcdef" for c in job_id.lower()):
+        return "Preview inválido.", 404
+    caminho = _preview_path(job_id)
+    if not os.path.isfile(caminho):
+        return "Preview expirado.", 404
+    return send_file(
+        caminho,
+        mimetype="image/jpeg",
+        conditional=True,
+        max_age=3600,
+    )
 
 
 @app.route("/agente/registrar-video-local", methods=["POST"])
 def agente_registrar_video_local():
     """
-    V9: registra somente preview + medidas do Reel analisado no PC.
-
-    O MP4 original NÃO sobe para o Railway. Ele fica no cache local do agente
-    e será usado pelo FFmpeg do PC quando o usuário clicar em Gerar todos.
-    Isso reduz CPU, armazenamento temporário e tráfego de arquivos fonte no
-    Railway, especialmente em lotes de 100.
+    Registra somente preview + medidas. O MP4 original continua no PC.
+    O preview é convertido de Base64 para JPEG no disco imediatamente, evitando
+    que dezenas/centenas de strings Base64 fiquem residentes na RAM do Railway.
     """
     autorizado, erro = _autorizar_automacao()
     if not autorizado:
@@ -632,27 +815,63 @@ def agente_registrar_video_local():
     except (TypeError, ValueError):
         return jsonify({"erro": "Recorte do vídeo inválido."}), 400
 
-    frame = str(dados.get("frame") or "")
-    if not frame.startswith("data:image/jpeg;base64,"):
+    frame_data = str(dados.get("frame") or "")
+    prefixo = "data:image/jpeg;base64,"
+    if not frame_data.startswith(prefixo):
         return jsonify({"erro": "Preview JPEG ausente."}), 400
-    # Evita que um agente com bug coloque blobs enormes na RAM do Railway.
-    if len(frame) > 2_000_000:
+    if len(frame_data) > 2_000_000:
         return jsonify({"erro": "Preview grande demais."}), 413
 
+    # Primeiro confere tarefa/retry. Assim retry não decodifica nem grava de novo.
     with AUTOMACAO_LOCK:
         AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
-
         if task_id != AUTOMACAO_STATUS.get("job_id"):
             return jsonify({"erro": "Essa tarefa não é mais a tarefa atual."}), 409
         if not AUTOMACAO_STATUS.get("rodando"):
             return jsonify({"erro": "Não existe coleta ativa."}), 409
-
-        # Retry idempotente pelo URL do Reel.
         for existente in AUTOMACAO_STATUS.get("itens") or []:
             if reel_url and existente.get("reel_url") == reel_url:
                 return jsonify(existente)
 
-        video_job_id = uuid.uuid4().hex
+    video_job_id = uuid.uuid4().hex
+    frame_path = _preview_path(video_job_id)
+    try:
+        frame_bytes = base64.b64decode(frame_data[len(prefixo):], validate=True)
+    except (binascii.Error, ValueError):
+        return jsonify({"erro": "Preview JPEG inválido."}), 400
+
+    if not frame_bytes.startswith(b"\xff\xd8\xff"):
+        return jsonify({"erro": "O preview recebido não é JPEG válido."}), 400
+
+    try:
+        with open(frame_path, "wb") as f:
+            f.write(frame_bytes)
+    except OSError as exc:
+        return jsonify({"erro": f"Não foi possível salvar o preview: {exc}"}), 500
+
+    # Solta referências grandes o quanto antes.
+    frame_bytes = None
+    frame_data = None
+    dados.pop("frame", None)
+
+    with AUTOMACAO_LOCK:
+        # A tarefa pode ter mudado enquanto o JPEG era salvo.
+        if task_id != AUTOMACAO_STATUS.get("job_id") or not AUTOMACAO_STATUS.get("rodando"):
+            try:
+                os.remove(frame_path)
+            except OSError:
+                pass
+            return jsonify({"erro": "A tarefa mudou durante o registro do preview."}), 409
+
+        # Segunda checagem idempotente para corrida rara entre dois retries.
+        for existente in AUTOMACAO_STATUS.get("itens") or []:
+            if reel_url and existente.get("reel_url") == reel_url:
+                try:
+                    os.remove(frame_path)
+                except OSError:
+                    pass
+                return jsonify(existente)
+
         UPLOADS[video_job_id] = {
             "path": None,
             "nome": nome_seguro,
@@ -666,7 +885,7 @@ def agente_registrar_video_local():
             "altura": altura,
             "box": box,
             "confianca": round(max(0.0, min(confianca, 1.0)), 2),
-            "frame": frame,
+            "frame": _preview_url(video_job_id),
             "nome": nome_seguro,
             "reel_url": reel_url,
             "origem": "agente_pc_local",
@@ -681,10 +900,14 @@ def agente_registrar_video_local():
             "originais ficam no PC"
         )
 
+    # Metadados do Reel local e preview podem ficar 24h; não existe MP4 no Railway.
+    _limpar_depois([frame_path], delay=86400, upload_ids=[video_job_id])
+    _liberar_memoria()
     return jsonify(item)
 
 
 @app.route("/agente/upload-video", methods=["POST"])
+
 def agente_upload_video():
     autorizado, erro = _autorizar_automacao()
     if not autorizado:
@@ -796,20 +1019,25 @@ def importar_instagram():
     entrada = None
 
     try:
-        entrada, nome = instagram_import.baixar_video_instagram(
-            url=url,
-            pasta_destino=WORK_DIR,
-            identificador=job_id,
-            limite_mb=MAX_VIDEO_UPLOAD_MB,
+        retorno = _worker_json(
+            INSTAGRAM_WORKER,
+            {
+                "url": url,
+                "pasta_destino": WORK_DIR,
+                "identificador": job_id,
+                "limite_mb": MAX_VIDEO_UPLOAD_MB,
+            },
+            timeout=300,
         )
+        if not retorno.get("ok"):
+            return jsonify({"erro": str(retorno.get("erro") or "Falha ao importar o Reels.")}), 400
+
+        entrada = str(retorno.get("path") or "")
+        nome = str(retorno.get("nome") or "reel.mp4")
+        if not entrada or not os.path.isfile(entrada):
+            raise RuntimeError("O importador não retornou o vídeo baixado.")
+
         return jsonify(_analisar_arquivo(entrada, nome, job_id))
-    except instagram_import.InstagramImportError as e:
-        if entrada:
-            try:
-                os.remove(entrada)
-            except OSError:
-                pass
-        return jsonify({"erro": str(e)}), 400
     except Exception as e:
         if entrada:
             try:
@@ -817,9 +1045,12 @@ def importar_instagram():
             except OSError:
                 pass
         return jsonify({"erro": f"Falha ao importar o Reels: {e}"}), 500
+    finally:
+        _liberar_memoria()
 
 
 @app.route("/ler-legenda", methods=["POST"])
+
 def ler_legenda():
     if _corpo_maior_que(MAX_LEGENDA_BODY_BYTES):
         return jsonify({
@@ -1085,6 +1316,9 @@ def gerar_hibrido():
         }
         GERACAO_PC_FILA.append(task_id)
 
+    # Evita crescimento infinito de tarefas abandonadas em RAM.
+    _limpar_depois(delay=86400, task_ids=[task_id])
+
     return jsonify({
         "modo": "pc",
         "task_id": task_id,
@@ -1170,7 +1404,7 @@ def agente_resultado_geracao():
     base_nome = os.path.splitext(item.get("nome") or "video")[0]
     nome_saida = f"post_{base_nome}.mp4"
     RESULTS[job_id] = {"path": saida, "nome": nome_saida}
-    _limpar_depois([saida], delay=7200)
+    _limpar_depois([saida], delay=7200, result_ids=[job_id])
 
     with AUTOMACAO_LOCK:
         AUTOMACAO_STATUS["agente_ultimo_ping"] = time.time()
@@ -1183,6 +1417,8 @@ def agente_resultado_geracao():
             tarefa["erro"] = None
             tarefa["atualizado_em"] = time.time()
 
+    _limpar_depois(delay=7200, task_ids=[task_id])
+    _liberar_memoria()
     return jsonify({"ok": True, "id": job_id})
 
 
@@ -1205,6 +1441,7 @@ def agente_geracao_erro():
         tarefa["mensagem"] = mensagem
         tarefa["atualizado_em"] = time.time()
 
+    _limpar_depois(delay=7200, task_ids=[task_id])
     return jsonify({"ok": True})
 
 
@@ -1255,27 +1492,38 @@ def gerar():
     saida = os.path.join(WORK_DIR, f"{job_id}_post.mp4")
 
     try:
-        # Gerações ficam em fila para impedir mistura de configurações entre perfis.
-        # As demais rotas continuam atendendo graças ao worker gthread do Procfile.
+        # Renderiza em um Python filho. Pillow/Pilmoji são descarregados quando
+        # o worker termina, em vez de ficarem ocupando RAM do Gunicorn por horas.
         with GERACAO_LOCK:
-            if crop and all(k in crop for k in ("x", "y", "w", "h")):
-                regiao = (crop["x"], crop["y"], crop["w"], crop["h"])
-                meme_maker.make_post_from_crop(
-                    entrada, legenda, saida, regiao,
-                    perfil=perfil, uniqueness=uniqueness
-                )
-            else:
-                meme_maker.make_post(
-                    entrada, legenda, saida,
-                    perfil=perfil, uniqueness=uniqueness
-                )
+            retorno = _worker_json(
+                RENDER_WORKER,
+                {
+                    "entrada": entrada,
+                    "saida": saida,
+                    "legenda": legenda,
+                    "crop": crop,
+                    "perfil": perfil,
+                    "uniqueness": uniqueness,
+                },
+                timeout=1800,
+            )
+            if not retorno.get("ok"):
+                raise RuntimeError(str(retorno.get("erro") or "Falha desconhecida no render."))
     except Exception as e:
+        try:
+            os.remove(saida)
+        except OSError:
+            pass
         return jsonify({"erro": f"Falha ao gerar: {e}"}), 500
+
+    if not os.path.isfile(saida):
+        return jsonify({"erro": "Falha ao gerar: o arquivo final não foi criado."}), 500
 
     base = os.path.splitext(item["nome"])[0]
     nome_saida = f"post_{base}.mp4"
     RESULTS[job_id] = {"path": saida, "nome": nome_saida}
-    _limpar_depois([saida])
+    _limpar_depois([saida], delay=3600, result_ids=[job_id])
+    _liberar_memoria()
     return jsonify({"id": job_id})
 
 
@@ -1285,32 +1533,53 @@ def baixar_zip():
     if not ids:
         return "Nenhum item para baixar.", 400
 
-    buf = io.BytesIO()
+    # Antes o ZIP inteiro era montado em io.BytesIO, duplicando dezenas/centenas
+    # de MB na RAM. Agora ele é criado no disco temporário e enviado por streaming.
+    zip_path = os.path.join(WORK_DIR, f"posts_{uuid.uuid4().hex}.zip")
     usados = set()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for job_id in ids:
-            item = RESULTS.get(job_id)
-            if not item or not os.path.exists(item["path"]):
-                continue
-            nome = item["nome"]
-            n = nome
-            i = 2
-            while n in usados:
-                base, ext = os.path.splitext(nome)
-                n = f"{base}_{i}{ext}"
-                i += 1
-            usados.add(n)
-            zf.write(item["path"], n)
+    try:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for job_id in ids:
+                item = RESULTS.get(job_id)
+                if not item or not os.path.exists(item["path"]):
+                    continue
+                nome = item["nome"]
+                n = nome
+                i = 2
+                while n in usados:
+                    base, ext = os.path.splitext(nome)
+                    n = f"{base}_{i}{ext}"
+                    i += 1
+                usados.add(n)
+                zf.write(item["path"], n)
 
-    if not usados:
-        return "Arquivos expirados. Gere novamente.", 404
+        if not usados:
+            try:
+                os.remove(zip_path)
+            except OSError:
+                pass
+            return "Arquivos expirados. Gere novamente.", 404
 
-    buf.seek(0)
-    return send_file(buf, mimetype="application/zip",
-                     as_attachment=True, download_name="posts.zip")
+        # Dez minutos são suficientes para o send_file terminar mesmo em conexão lenta.
+        _limpar_depois([zip_path], delay=600)
+        _liberar_memoria()
+        return send_file(
+            zip_path,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name="posts.zip",
+            conditional=True,
+        )
+    except Exception:
+        try:
+            os.remove(zip_path)
+        except OSError:
+            pass
+        raise
 
 
 @app.route("/baixar/<job_id>")
+
 def baixar(job_id):
     item = RESULTS.get(job_id)
     if not item or not os.path.exists(item["path"]):
