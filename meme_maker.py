@@ -59,6 +59,9 @@ PERFIS = {
         "nome": "Adulta Sofrida",
         "handle": "@AdultaSofrida",
         "avatar": os.path.join(_BASE, "avatar4.png"),
+        "logo": os.path.join(_BASE, "logo_adultasofrida.png"),
+        "logo_opacity": 0.25,
+        "logo_width": 130,
     },
     "achadinhosofcs": {
         "nome": "achadinhosofcs",
