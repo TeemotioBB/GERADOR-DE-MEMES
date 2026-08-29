@@ -422,6 +422,15 @@
     </select>
   </div>
 
+  <div class="perfil-bar" style="margin-top:-6px;border:2px solid #3b82f6;background:linear-gradient(180deg,#eef6ff,#dfeeff);">
+    <label for="chkLegendaHumor" style="display:flex;align-items:flex-start;gap:12px;cursor:pointer;font-size:15px;font-weight:800;color:#172033;">
+      <input type="checkbox" id="chkLegendaHumor" style="width:22px;height:22px;accent-color:#2563eb;margin-top:1px;flex:0 0 auto;">
+      <span>💬 APLICAR CTA EM TODOS OS VÍDEOS
+        <small style="display:block;font-size:12px;font-weight:600;color:#49627d;margin-top:5px;line-height:1.4;">Se você é fã de humor, já era para estar nos seguindo.</small>
+      </span>
+    </label>
+  </div>
+
   <div class="perfil-bar" style="margin-top:-6px;">
     <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px;font-weight:650;">
       <input type="checkbox" id="chkEdicoesExtras" style="width:18px;height:18px;accent-color:#3b82f6;">
@@ -1747,9 +1756,15 @@ https://www.instagram.com/reel/..."></textarea>
       return;
     }
 
-    const semLegenda = prontos.filter(
-      it => !it.legenda.trim()
-    );
+    const usarLegendaHumor =
+      document.getElementById('chkLegendaHumor').checked;
+
+    const LEGENDA_HUMOR =
+      'Se você é fã de humor, já era para estar nos seguindo.';
+
+    const semLegenda = usarLegendaHumor
+      ? []
+      : prontos.filter(it => !it.legenda.trim());
 
     if (
       semLegenda.length &&
@@ -1761,9 +1776,11 @@ https://www.instagram.com/reel/..."></textarea>
       return;
     }
 
-    const fila = prontos.filter(
-      it => it.legenda.trim()
-    );
+    // Com a opção marcada, todos os vídeos entram na fila mesmo que o campo
+    // individual de legenda esteja vazio. A frase fixa substitui a legenda.
+    const fila = usarLegendaHumor
+      ? prontos
+      : prontos.filter(it => it.legenda.trim());
 
     if (!fila.length){
       return;
@@ -1852,7 +1869,7 @@ https://www.instagram.com/reel/..."></textarea>
 
       const payload = {
         id: it.jobId,
-        legenda: it.legenda.trim(),
+        legenda: usarLegendaHumor ? LEGENDA_HUMOR : it.legenda.trim(),
         crop: it.box,
         perfil: perfilSel,
         uniqueness: {
