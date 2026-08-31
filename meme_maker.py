@@ -216,10 +216,10 @@ COLOR_CAPTION = (15, 20, 25)
 # ----------------- IDENTIDADE VISUAL EXCLUSIVA @adultosofrido -----------------
 # Nada aqui é aplicado aos outros perfis.
 ADULTO_VISUAL_ATIVO = True
-# VERSAO_VISUAL = "adultosofrido_cta_dinamico_v2_gap_maior"
+# VERSAO_VISUAL = "adultosofrido_cta_texto_limpo_v1"
 ADULTO_CTA_TEXTO_1 = "GOSTOU?"
 ADULTO_CTA_TEXTO_2 = "SIGA A PÁGINA"
-ADULTO_CTA_RESERVA_H = 230
+ADULTO_CTA_RESERVA_H = 190
 
 ADULTO_PRETO = (18, 18, 18, 255)
 ADULTO_VERMELHO = (235, 43, 43, 255)
@@ -418,85 +418,42 @@ def _desenhar_laterais_adulto(img, header_y, video_y, video_h):
 
 
 def _desenhar_cta_adulto(img, video_y, video_h):
-    """CTA dinâmica: fica sempre um pouco abaixo do vídeo, só para @adultosofrido."""
+    """CTA dinâmica em texto puro, exclusiva do @adultosofrido."""
     if PERFIL_ATUAL != "adultosofrido" or not ADULTO_VISUAL_ATIVO:
         return
 
     draw = ImageDraw.Draw(img)
     cx = CANVAS_W // 2
 
-    # CTA acompanha a posição final do vídeo:
-    # sempre alguns pixels abaixo da base do vídeo, sem encostar demais.
-    w = 650
-    h = 120
+    # Continua acompanhando a base do vídeo.
     gap_abaixo_video = 78
-
-    # Posição desejada
     y_ideal = int(video_y + video_h + gap_abaixo_video)
 
-    # Mantém dentro da área segura inferior do Reel.
+    # Altura aproximada das duas linhas.
+    altura_cta = 92
     y_min = 1450
-    y_max = CANVAS_H - SAFE_MARGIN_Y - h
+    y_max = CANVAS_H - SAFE_MARGIN_Y - altura_cta
     y = max(y_min, min(y_ideal, y_max))
 
-    x1 = cx - w // 2
-    x2 = cx + w // 2
-
-    # Sombra curta.
-    draw.polygon(
-        [
-            (x1+15, y+17), (x1+65, y+8), (x2-30, y+14), (x2+8, y+29),
-            (x2-2, y+h+5), (x1+42, y+h+4), (x1-4, y+h-9)
-        ],
-        fill=(0, 0, 0, 42),
-    )
-
-    # Pincelada preta principal.
-    draw.polygon(
-        [
-            (x1+18, y+5), (x1+88, y-4), (x2-42, y+2), (x2+3, y+19),
-            (x2-9, y+52), (x2+2, y+91), (x2-50, y+h),
-            (x1+52, y+h-5), (x1-6, y+h-20), (x1+7, y+45),
-        ],
-        fill=ADULTO_PRETO,
-    )
-
-    # Faixa amarela por trás da segunda linha.
-    draw.polygon(
-        [
-            (x1+58, y+61), (x2-36, y+54),
-            (x2-48, y+106), (x1+42, y+110)
-        ],
-        fill=ADULTO_AMARELO,
-    )
-
     f1 = _font(FONT_BOLD, 35)
-    f2 = _font(FONT_BOLD, 43)
+    f2 = _font(FONT_BOLD, 45)
+
+    # Apenas texto. Sem faixa, pincelada, sombra ou elementos decorativos.
+    _texto_centralizado(
+        draw,
+        (cx, y + 18),
+        ADULTO_CTA_TEXTO_1,
+        f1,
+        ADULTO_PRETO
+    )
 
     _texto_centralizado(
-        draw, (cx, y+31),
-        ADULTO_CTA_TEXTO_1, f1, ADULTO_BRANCO
+        draw,
+        (cx, y + 66),
+        ADULTO_CTA_TEXTO_2,
+        f2,
+        ADULTO_PRETO
     )
-    _texto_centralizado(
-        draw, (cx-20, y+84),
-        ADULTO_CTA_TEXTO_2, f2, ADULTO_PRETO
-    )
-
-    # Emoji gráfico integrado na faixa.
-    _desenhar_carinha_rindo(draw, x2-54, y+84, raio=20)
-
-    # Tracinhos curtos externos.
-    for x, yy, direcao in [
-        (x1-40, y+76, 1),
-        (x1-55, y+94, 1),
-        (x2+22, y+72, -1),
-        (x2+36, y+91, -1),
-    ]:
-        draw.line(
-            (x, yy, x + 18*direcao, yy-10),
-            fill=ADULTO_PRETO,
-            width=5
-        )
 
 
 def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
