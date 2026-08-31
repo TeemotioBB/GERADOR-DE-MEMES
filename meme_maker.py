@@ -216,9 +216,9 @@ COLOR_CAPTION = (15, 20, 25)
 # ----------------- IDENTIDADE VISUAL EXCLUSIVA @adultosofrido -----------------
 # Nada aqui é aplicado aos outros perfis.
 ADULTO_VISUAL_ATIVO = True
-# VERSAO_VISUAL = "adultosofrido_sem_icones_soltos_v2"
-ADULTO_CTA_TEXTO_1 = "CURTIU?"
-ADULTO_CTA_TEXTO_2 = "SEGUE A PÁGINA"
+# VERSAO_VISUAL = "adultosofrido_cta_only_gostou_v1"
+ADULTO_CTA_TEXTO_1 = "GOSTOU?"
+ADULTO_CTA_TEXTO_2 = "SIGA A PÁGINA"
 ADULTO_CTA_RESERVA_H = 150
 
 ADULTO_PRETO = (18, 18, 18, 255)
@@ -411,95 +411,11 @@ def _desenhar_carinha_rindo(draw, cx, cy, raio=30):
 
 def _desenhar_laterais_adulto(img, header_y, video_y, video_h):
     """
-    Identidade lateral exclusiva do @adultosofrido.
-
-    Sem ícones soltos. As laterais funcionam como duas assinaturas gráficas
-    contínuas, presas nas bordas do Reel, com pinceladas + halftone.
+    Identidade lateral desativada.
+    Para o @adultosofrido agora fica somente a CTA inferior.
     """
-    if PERFIL_ATUAL != "adultosofrido" or not ADULTO_VISUAL_ATIVO:
-        return
+    return
 
-    draw = ImageDraw.Draw(img)
-
-    # Acompanha verticalmente o bloco principal sem depender do formato do vídeo.
-    y_esq = _clamp(video_y + video_h * 0.26, 430, 1260)
-    y_dir = _clamp(video_y + video_h * 0.58, 680, 1460)
-
-    # ===== ASSINATURA ESQUERDA =====
-    # Base preta vertical, parcialmente fora da tela.
-    draw.polygon(
-        [
-            (-18, y_esq-82), (34, y_esq-105), (52, y_esq-82),
-            (33, y_esq+182), (-18, y_esq+205)
-        ],
-        fill=ADULTO_PRETO
-    )
-
-    # Faixa amarela conectada.
-    draw.polygon(
-        [
-            (-14, y_esq-48), (58, y_esq-82), (65, y_esq-58),
-            (22, y_esq+82), (-14, y_esq+97)
-        ],
-        fill=ADULTO_AMARELO
-    )
-
-    # Rasgo vermelho no mesmo conjunto.
-    draw.polygon(
-        [
-            (-12, y_esq+92), (54, y_esq+58), (62, y_esq+78),
-            (8, y_esq+140), (-12, y_esq+151)
-        ],
-        fill=ADULTO_VERMELHO
-    )
-
-    # Halftone integrado ao pé do bloco.
-    for r in range(9):
-        for c in range(4):
-            px = 7 + c * 11
-            py = y_esq + 155 + r * 11
-            raio = 2 if r < 6 else 1
-            cor = ADULTO_AMARELO if (r+c) % 2 == 0 else ADULTO_PRETO
-            draw.ellipse((px-raio, py-raio, px+raio, py+raio), fill=cor)
-
-    # ===== ASSINATURA DIREITA =====
-    xr = CANVAS_W
-
-    # Base preta.
-    draw.polygon(
-        [
-            (xr-38, y_dir-126), (xr+16, y_dir-105),
-            (xr+16, y_dir+158), (xr-48, y_dir+128)
-        ],
-        fill=ADULTO_PRETO
-    )
-
-    # Faixa amarela central.
-    draw.polygon(
-        [
-            (xr-58, y_dir-70), (xr+16, y_dir-43),
-            (xr+16, y_dir+62), (xr-50, y_dir+38)
-        ],
-        fill=ADULTO_AMARELO
-    )
-
-    # Acento vermelho.
-    draw.polygon(
-        [
-            (xr-42, y_dir+42), (xr+16, y_dir+61),
-            (xr+16, y_dir+98), (xr-57, y_dir+74)
-        ],
-        fill=ADULTO_VERMELHO
-    )
-
-    # Halftone integrado.
-    for r in range(9):
-        for c in range(4):
-            px = CANVAS_W - 8 - c * 11
-            py = y_dir + 120 + r * 11
-            raio = 2 if r < 6 else 1
-            cor = ADULTO_AMARELO if (r+c) % 2 == 0 else ADULTO_PRETO
-            draw.ellipse((px-raio, py-raio, px+raio, py+raio), fill=cor)
 
 def _desenhar_cta_adulto(img):
     """CTA fixa, forte e exclusiva do @adultosofrido."""
@@ -508,7 +424,7 @@ def _desenhar_cta_adulto(img):
 
     draw = ImageDraw.Draw(img)
     cx = CANVAS_W // 2
-    y = 1738
+    y = 1690
     w = 650
     h = 120
     x1 = cx - w // 2
