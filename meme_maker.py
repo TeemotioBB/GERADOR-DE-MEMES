@@ -216,7 +216,7 @@ COLOR_CAPTION = (15, 20, 25)
 # ----------------- IDENTIDADE VISUAL EXCLUSIVA @adultosofrido -----------------
 # Nada aqui é aplicado aos outros perfis.
 ADULTO_VISUAL_ATIVO = True
-# VERSAO_VISUAL = "adultosofrido_cta_texto_limpo_v1"
+# VERSAO_VISUAL = "adultosofrido_cta_texto_menor_v1"
 ADULTO_CTA_TEXTO_1 = "GOSTOU?"
 ADULTO_CTA_TEXTO_2 = "SIGA A PÁGINA"
 ADULTO_CTA_RESERVA_H = 190
@@ -435,8 +435,8 @@ def _desenhar_cta_adulto(img, video_y, video_h):
     y_max = CANVAS_H - SAFE_MARGIN_Y - altura_cta
     y = max(y_min, min(y_ideal, y_max))
 
-    f1 = _font(FONT_BOLD, 35)
-    f2 = _font(FONT_BOLD, 45)
+    f1 = _font(FONT_BOLD, 31)
+    f2 = _font(FONT_BOLD, 40)
 
     # Apenas texto. Sem faixa, pincelada, sombra ou elementos decorativos.
     _texto_centralizado(
