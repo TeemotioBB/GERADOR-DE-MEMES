@@ -216,10 +216,10 @@ COLOR_CAPTION = (15, 20, 25)
 # ----------------- IDENTIDADE VISUAL EXCLUSIVA @adultosofrido -----------------
 # Nada aqui é aplicado aos outros perfis.
 ADULTO_VISUAL_ATIVO = True
-# VERSAO_VISUAL = "adultosofrido_cta_only_gostou_v1"
+# VERSAO_VISUAL = "adultosofrido_cta_dinamico_v1"
 ADULTO_CTA_TEXTO_1 = "GOSTOU?"
 ADULTO_CTA_TEXTO_2 = "SIGA A PÁGINA"
-ADULTO_CTA_RESERVA_H = 150
+ADULTO_CTA_RESERVA_H = 190
 
 ADULTO_PRETO = (18, 18, 18, 255)
 ADULTO_VERMELHO = (235, 43, 43, 255)
@@ -417,16 +417,28 @@ def _desenhar_laterais_adulto(img, header_y, video_y, video_h):
     return
 
 
-def _desenhar_cta_adulto(img):
-    """CTA fixa, forte e exclusiva do @adultosofrido."""
+def _desenhar_cta_adulto(img, video_y, video_h):
+    """CTA dinâmica: fica sempre um pouco abaixo do vídeo, só para @adultosofrido."""
     if PERFIL_ATUAL != "adultosofrido" or not ADULTO_VISUAL_ATIVO:
         return
 
     draw = ImageDraw.Draw(img)
     cx = CANVAS_W // 2
-    y = 1690
+
+    # CTA acompanha a posição final do vídeo:
+    # sempre alguns pixels abaixo da base do vídeo, sem encostar demais.
     w = 650
     h = 120
+    gap_abaixo_video = 34
+
+    # Posição desejada
+    y_ideal = int(video_y + video_h + gap_abaixo_video)
+
+    # Mantém dentro da área segura inferior do Reel.
+    y_min = 1450
+    y_max = CANVAS_H - SAFE_MARGIN_Y - h
+    y = max(y_min, min(y_ideal, y_max))
+
     x1 = cx - w // 2
     x2 = cx + w // 2
 
@@ -449,7 +461,7 @@ def _desenhar_cta_adulto(img):
         fill=ADULTO_PRETO,
     )
 
-    # Pequena faixa amarela por trás para reforçar a identidade.
+    # Faixa amarela por trás da segunda linha.
     draw.polygon(
         [
             (x1+58, y+61), (x2-36, y+54),
@@ -470,10 +482,10 @@ def _desenhar_cta_adulto(img):
         ADULTO_CTA_TEXTO_2, f2, ADULTO_PRETO
     )
 
-    # Emoji gráfico integrado na faixa, não solto.
+    # Emoji gráfico integrado na faixa.
     _desenhar_carinha_rindo(draw, x2-54, y+84, raio=20)
 
-    # Tracinhos curtos conectados visualmente à tarja.
+    # Tracinhos curtos externos.
     for x, yy, direcao in [
         (x1-40, y+76, 1),
         (x1-55, y+94, 1),
@@ -567,7 +579,7 @@ def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
     # É desenhada antes de abrir o "buraco" do vídeo: qualquer pixel que por
     # acaso invada o retângulo do vídeo é removido automaticamente abaixo.
     _desenhar_laterais_adulto(img, header_y, video_y, video_disp_h)
-    _desenhar_cta_adulto(img)
+    _desenhar_cta_adulto(img, video_y, video_disp_h)
 
     card_w = video_disp_w
     card_x = (CANVAS_W - card_w) // 2
