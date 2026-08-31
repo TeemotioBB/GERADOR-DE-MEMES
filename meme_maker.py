@@ -216,10 +216,10 @@ COLOR_CAPTION = (15, 20, 25)
 # ----------------- IDENTIDADE VISUAL EXCLUSIVA @adultosofrido -----------------
 # Nada aqui é aplicado aos outros perfis.
 ADULTO_VISUAL_ATIVO = True
-# VERSAO_VISUAL = "adultosofrido_cta_dinamico_v1"
+# VERSAO_VISUAL = "adultosofrido_cta_dinamico_v2_gap_maior"
 ADULTO_CTA_TEXTO_1 = "GOSTOU?"
 ADULTO_CTA_TEXTO_2 = "SIGA A PÁGINA"
-ADULTO_CTA_RESERVA_H = 190
+ADULTO_CTA_RESERVA_H = 230
 
 ADULTO_PRETO = (18, 18, 18, 255)
 ADULTO_VERMELHO = (235, 43, 43, 255)
@@ -429,7 +429,7 @@ def _desenhar_cta_adulto(img, video_y, video_h):
     # sempre alguns pixels abaixo da base do vídeo, sem encostar demais.
     w = 650
     h = 120
-    gap_abaixo_video = 34
+    gap_abaixo_video = 78
 
     # Posição desejada
     y_ideal = int(video_y + video_h + gap_abaixo_video)
