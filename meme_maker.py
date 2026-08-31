@@ -213,6 +213,18 @@ COLOR_NAME = (15, 20, 25)
 COLOR_HANDLE = (83, 100, 113)
 COLOR_CAPTION = (15, 20, 25)
 
+# ----------------- IDENTIDADE VISUAL EXCLUSIVA @adultosofrido -----------------
+# Nada aqui é aplicado aos outros perfis.
+ADULTO_VISUAL_ATIVO = True
+ADULTO_CTA_TEXTO_1 = "CURTIU?"
+ADULTO_CTA_TEXTO_2 = "SEGUE A PÁGINA"
+ADULTO_CTA_RESERVA_H = 150
+
+ADULTO_PRETO = (18, 18, 18, 255)
+ADULTO_VERMELHO = (235, 43, 43, 255)
+ADULTO_AMARELO = (255, 191, 0, 255)
+ADULTO_BRANCO = (255, 255, 255, 255)
+
 
 
 def run(cmd):
@@ -362,6 +374,144 @@ def _atempo_filter(speed):
 
 
 # ====================== RESTO DO CÓDIGO (mantido limpo) ======================
+
+def _clamp(v, minimo, maximo):
+    return max(minimo, min(maximo, int(v)))
+
+
+def _texto_centralizado(draw, xy_centro, texto, font, fill):
+    """Desenha texto centralizado usando a caixa real da fonte."""
+    cx, cy = xy_centro
+    bbox = draw.textbbox((0, 0), texto, font=font)
+    w = bbox[2] - bbox[0]
+    h = bbox[3] - bbox[1]
+    draw.text(
+        (int(cx - w / 2 - bbox[0]), int(cy - h / 2 - bbox[1])),
+        texto,
+        font=font,
+        fill=fill,
+    )
+
+
+def _desenhar_raio(draw, x, y, escala=1.0):
+    pts = [
+        (x + 26*escala, y),
+        (x + 4*escala, y + 38*escala),
+        (x + 23*escala, y + 34*escala),
+        (x + 10*escala, y + 72*escala),
+        (x + 48*escala, y + 25*escala),
+        (x + 29*escala, y + 28*escala),
+    ]
+    draw.line(pts + [pts[0]], fill=ADULTO_PRETO, width=max(3, int(5*escala)), joint="curve")
+
+
+def _desenhar_x(draw, x, y, tamanho=34, cor=None, largura=9):
+    cor = cor or ADULTO_VERMELHO
+    draw.line((x, y, x+tamanho, y+tamanho), fill=cor, width=largura)
+    draw.line((x+tamanho, y, x, y+tamanho), fill=cor, width=largura)
+
+
+def _desenhar_pontilhado(draw, x, y, cols=4, rows=8, passo=13, cor=None):
+    cor = cor or ADULTO_AMARELO
+    for r in range(rows):
+        for c in range(cols):
+            raio = 2 if (r + c) % 3 else 3
+            px = x + c * passo
+            py = y + r * passo
+            draw.ellipse((px-raio, py-raio, px+raio, py+raio), fill=cor)
+
+
+def _desenhar_balao_haha(draw, x, y):
+    """Balão pequeno, sempre encostado na lateral e sem contornar o vídeo."""
+    w, h = 78, 58
+    draw.rounded_rectangle((x, y, x+w, y+h), radius=18, outline=ADULTO_PRETO, width=4)
+    draw.polygon([(x+18, y+h-2), (x+8, y+h+14), (x+30, y+h-2)], fill=ADULTO_BRANCO)
+    draw.line((x+18, y+h-2, x+8, y+h+14, x+30, y+h-2), fill=ADULTO_PRETO, width=4)
+    f = _font(FONT_BOLD, 22)
+    _texto_centralizado(draw, (x+w/2, y+h/2), "HAHA", f, ADULTO_PRETO)
+
+
+def _desenhar_carinha_rindo(draw, cx, cy, raio=30):
+    """Ícone vetorial simples; não depende de fonte de emoji."""
+    box = (cx-raio, cy-raio, cx+raio, cy+raio)
+    draw.ellipse(box, outline=ADULTO_AMARELO, width=5)
+    # olhos fechados
+    draw.arc((cx-raio*0.62, cy-raio*0.38, cx-raio*0.05, cy+raio*0.05), 200, 340, fill=ADULTO_AMARELO, width=4)
+    draw.arc((cx+raio*0.05, cy-raio*0.38, cx+raio*0.62, cy+raio*0.05), 200, 340, fill=ADULTO_AMARELO, width=4)
+    # sorriso
+    draw.arc((cx-raio*0.58, cy-raio*0.02, cx+raio*0.58, cy+raio*0.62), 10, 170, fill=ADULTO_AMARELO, width=5)
+
+
+def _desenhar_laterais_adulto(img, header_y, video_y, video_h):
+    """Detalhes leves nas BORDAS do Reel. Nunca cria moldura em volta do vídeo."""
+    if PERFIL_ATUAL != "adultosofrido" or not ADULTO_VISUAL_ATIVO:
+        return
+
+    draw = ImageDraw.Draw(img)
+
+    # Elementos acompanham verticalmente o bloco do post, mas ficam presos às bordas.
+    y_top = _clamp(video_y - 70, 140, 1180)
+    y_mid = _clamp(video_y + video_h * 0.34, 300, 1370)
+    y_low = _clamp(video_y + video_h * 0.72, 520, 1550)
+
+    # Esquerda: raio + pontilhado discreto.
+    _desenhar_raio(draw, 18, y_top, 0.78)
+    _desenhar_pontilhado(draw, 8, y_mid, cols=4, rows=7, passo=12, cor=ADULTO_AMARELO)
+
+    # Direita: HAHA + X vermelho.
+    _desenhar_balao_haha(draw, CANVAS_W - 86, y_top + 52)
+    _desenhar_x(draw, CANVAS_W - 58, y_low, tamanho=30, cor=ADULTO_VERMELHO, largura=8)
+
+    # Pequena pincelada vermelha na esquerda inferior, sem formar contorno.
+    yy = y_low + 54
+    draw.polygon(
+        [(0, yy+18), (74, yy-10), (58, yy+5), (92, yy-2), (0, yy+42)],
+        fill=ADULTO_VERMELHO,
+    )
+
+
+def _desenhar_cta_adulto(img):
+    """CTA fixa no rodapé, exclusiva do @adultosofrido."""
+    if PERFIL_ATUAL != "adultosofrido" or not ADULTO_VISUAL_ATIVO:
+        return
+
+    draw = ImageDraw.Draw(img)
+    cx = CANVAS_W // 2
+    y = 1742
+    w = 620
+    h = 116
+    x1 = cx - w // 2
+    x2 = cx + w // 2
+
+    # Fundo preto estilo pincelada/jagged, porém limpo.
+    poly = [
+        (x1+20, y+8), (x1+72, y), (x2-56, y+4), (x2-8, y+16),
+        (x2, y+52), (x2-12, y+h-12), (x2-72, y+h),
+        (x1+46, y+h-5), (x1, y+h-18), (x1+8, y+45),
+    ]
+    draw.polygon(poly, fill=ADULTO_PRETO)
+
+    # Pequenos traços decorativos externos.
+    for dx, dy in [(-38, 32), (-50, 52), (w+28, 34), (w+40, 54)]:
+        xx = x1 + dx
+        yy = y + dy
+        draw.line((xx, yy, xx+18, yy-10), fill=ADULTO_PRETO, width=5)
+
+    f1 = _font(FONT_BOLD, 38)
+    f2 = _font(FONT_BOLD, 45)
+
+    _texto_centralizado(draw, (cx, y+34), ADULTO_CTA_TEXTO_1, f1, ADULTO_BRANCO)
+
+    # Segunda linha centralizada; o emoji vetorial fica à direita.
+    bbox2 = draw.textbbox((0, 0), ADULTO_CTA_TEXTO_2, font=f2)
+    tw = bbox2[2] - bbox2[0]
+    face_space = 58
+    total = tw + face_space
+    tx = cx - total/2
+    draw.text((int(tx - bbox2[0]), y+55-bbox2[1]), ADULTO_CTA_TEXTO_2, font=f2, fill=ADULTO_AMARELO)
+    _desenhar_carinha_rindo(draw, int(tx + tw + 34), y+82, raio=22)
+
+
 def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
     img = Image.new("RGBA", (CANVAS_W, CANVAS_H), BG_COLOR + (255,))
     draw = ImageDraw.Draw(img)
@@ -437,6 +587,12 @@ def build_overlay(caption, video_disp_w, video_disp_h, video_y, header_y):
         lines = wrap_text(caption, f_caption, max_w, draw)
         for i, line in enumerate(lines):
             draw.text((MARGIN_X, caption_y + i * line_h), line, font=f_caption, fill=COLOR_CAPTION)
+
+    # Identidade visual exclusiva do @adultosofrido.
+    # É desenhada antes de abrir o "buraco" do vídeo: qualquer pixel que por
+    # acaso invada o retângulo do vídeo é removido automaticamente abaixo.
+    _desenhar_laterais_adulto(img, header_y, video_y, video_disp_h)
+    _desenhar_cta_adulto(img)
 
     card_x = MARGIN_X
     card_w = video_disp_w
@@ -532,7 +688,15 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
     caption_block_h = len(lines) * 58
 
     margem_seg = SAFE_MARGIN_Y
-    altura_disp = CANVAS_H - 2 * margem_seg
+
+    # Só o @adultosofrido reserva espaço no rodapé para a CTA.
+    # Os demais perfis mantêm exatamente o cálculo antigo.
+    reserva_cta = (
+        ADULTO_CTA_RESERVA_H
+        if PERFIL_ATUAL == "adultosofrido" and ADULTO_VISUAL_ATIVO
+        else 0
+    )
+    altura_disp = CANVAS_H - 2 * margem_seg - reserva_cta
 
     def altura_bloco(ch):
         return AVATAR_SIZE + GAP_HEADER_CAP + caption_block_h + GAP_CAP_VIDEO + ch
