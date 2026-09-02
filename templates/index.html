@@ -583,6 +583,13 @@ https://www.instagram.com/reel/..."></textarea>
   btnCancelarAuto.addEventListener('click', cancelarAutomacaoReels);
   btnImportar.addEventListener('click', importarInstagram);
 
+  // O campo de links fica sempre editável, mesmo enquanto outro lote importa.
+  // Não interceptamos o evento paste: o navegador/iOS cuida da colagem nativa.
+  inputInstagram.addEventListener('paste', () => {
+    statusImportar.textContent = '';
+    statusImportar.className = 'importar-status';
+  });
+
   function chaveDaAutomacao(){
     return (chaveAutomacao.value || '').trim();
   }
@@ -1029,7 +1036,6 @@ https://www.instagram.com/reel/..."></textarea>
 
     render();
     btnImportar.disabled = true;
-    inputInstagram.disabled = true;
     statusImportar.className = 'importar-status';
 
     let sucessos = 0;
@@ -1078,7 +1084,6 @@ https://www.instagram.com/reel/..."></textarea>
       : `${sucessos} vídeo(s) importado(s) com sucesso. As legendas estão sendo lidas automaticamente.`;
     statusImportar.className = falhas ? 'importar-status erro' : 'importar-status';
     btnImportar.disabled = false;
-    inputInstagram.disabled = false;
     inputInstagram.focus();
   }
 
