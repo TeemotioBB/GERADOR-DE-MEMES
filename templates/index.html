@@ -1742,6 +1742,158 @@ https://www.instagram.com/reel/..."></textarea>
   }
 
 
+  const CHAVE_LOTE_ATIVO = 'gerador_memes_lote_ativo_v1';
+  let loteMonitoradoAtual = null;
+
+  function configurarDownloadDoLote(ids){
+    const listaIds = Array.from(new Set((ids || []).filter(Boolean)));
+    if (!listaIds.length){
+      btnZip.classList.remove('mostrar');
+      btnZip.onclick = null;
+      return;
+    }
+
+    btnZip.classList.add('mostrar');
+    btnZip.onclick = async e => {
+      e.preventDefault();
+      btnZip.textContent = 'Baixando...';
+
+      for (const id of listaIds){
+        const a = document.createElement('a');
+        a.href = '/baixar/' + id;
+        a.download = '';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        await new Promise(r => setTimeout(r, 800));
+      }
+
+      btnZip.textContent = '⬇ Baixar todos';
+    };
+  }
+
+  function aplicarStatusLote(dados){
+    const total = Number(dados.total || 0);
+    const feitos = Number(dados.feitos || 0);
+    const ok = Number(dados.ok || 0);
+    const falhas = Number(dados.falhas || 0);
+
+    barraGeral.classList.add('mostrar');
+    resumo.classList.add('mostrar');
+    preenche.style.width = total
+      ? `${Math.min(100, (feitos / total) * 100)}%`
+      : '0%';
+
+    const modo = dados.modo_economico
+      ? '💰 Segundo plano econômico'
+      : (dados.modo === 'pc'
+          ? '⚡ PC em segundo plano'
+          : (dados.modo === 'railway'
+              ? '☁️ Railway em segundo plano'
+              : '⚙️ Segundo plano'));
+
+    resumo.textContent =
+      `${modo} • ${feitos}/${total} concluído(s)` +
+      (falhas ? ` • ${falhas} falha(s)` : '') +
+      (dados.mensagem ? ` • ${dados.mensagem}` : '');
+
+    const porJob = new Map();
+    for (const it of itens){
+      if (it.jobId) porJob.set(it.jobId, it);
+    }
+
+    for (const st of (dados.itens || [])){
+      const it = porJob.get(st.job_id);
+      if (!it) continue;
+
+      if (st.estado === 'concluido'){
+        it.estado = 'ok';
+        it.msgErro = '';
+      } else if (st.estado === 'erro'){
+        it.estado = 'erro';
+        it.msgErro = st.erro || st.mensagem || 'Falha ao gerar.';
+      } else {
+        it.estado = 'processando';
+      }
+      it.modoGeracao = st.modo || null;
+    }
+
+    if (itens.length){
+      render();
+    }
+
+    if (dados.estado === 'concluido' || dados.estado === 'erro'){
+      resumo.textContent =
+        `Concluído: ${ok} pronto(s)` +
+        (falhas ? `, ${falhas} falhou(aram).` : '.') +
+        ' • Você podia sair da tela durante a geração.';
+      configurarDownloadDoLote(dados.ids_prontos || []);
+    }
+  }
+
+  async function consultarStatusLote(loteId){
+    const resp = await fetch(
+      `/lote-geracao/status/${encodeURIComponent(loteId)}`,
+      {cache:'no-store'}
+    );
+    const dados = await resp.json().catch(() => ({}));
+    if (!resp.ok){
+      const err = new Error(dados.erro || 'Falha ao consultar o lote.');
+      err.status = resp.status;
+      throw err;
+    }
+    return dados;
+  }
+
+  async function acompanharLoteServidor(loteId, restaurado=false){
+    loteMonitoradoAtual = loteId;
+    btnGerar.disabled = true;
+    btnLimpar.disabled = true;
+    barraGeral.classList.add('mostrar');
+    resumo.classList.add('mostrar');
+
+    if (restaurado){
+      resumo.textContent = '↻ Recuperando geração que ficou em segundo plano...';
+    }
+
+    while (loteMonitoradoAtual === loteId){
+      try {
+        const dados = await consultarStatusLote(loteId);
+        aplicarStatusLote(dados);
+
+        if (dados.estado === 'concluido' || dados.estado === 'erro'){
+          if (localStorage.getItem(CHAVE_LOTE_ATIVO) === loteId){
+            localStorage.removeItem(CHAVE_LOTE_ATIVO);
+          }
+          loteMonitoradoAtual = null;
+          btnGerar.disabled = false;
+          btnLimpar.disabled = false;
+          return dados;
+        }
+      } catch (err){
+        if (err.status === 404){
+          if (localStorage.getItem(CHAVE_LOTE_ATIVO) === loteId){
+            localStorage.removeItem(CHAVE_LOTE_ATIVO);
+          }
+          loteMonitoradoAtual = null;
+          btnGerar.disabled = false;
+          btnLimpar.disabled = false;
+          resumo.textContent = 'O lote em segundo plano expirou ou o servidor foi reiniciado.';
+          return null;
+        }
+
+        resumo.textContent =
+          '⚠ A tela perdeu conexão, mas a geração no servidor continua. ' +
+          'Tentando atualizar novamente...';
+      }
+
+      // Se a aba for colocada em segundo plano, o navegador pode atrasar este
+      // timer. Isso NÃO interrompe a geração: o timer agora só atualiza a tela.
+      await new Promise(r => setTimeout(r, 1250));
+    }
+    return null;
+  }
+
   btnGerar.addEventListener('click', async () => {
     const prontos = itens.filter(
       it =>
@@ -1750,9 +1902,7 @@ https://www.instagram.com/reel/..."></textarea>
     );
 
     if (!prontos.length){
-      alert(
-        'Aguarde a análise dos vídeos ou adicione algum.'
-      );
+      alert('Aguarde a análise dos vídeos ou adicione algum.');
       return;
     }
 
@@ -1776,15 +1926,11 @@ https://www.instagram.com/reel/..."></textarea>
       return;
     }
 
-    // Com a opção marcada, todos os vídeos entram na fila mesmo que o campo
-    // individual de legenda esteja vazio. A frase fixa substitui a legenda.
     const fila = usarLegendaHumor
       ? prontos
       : prontos.filter(it => it.legenda.trim());
 
-    if (!fila.length){
-      return;
-    }
+    if (!fila.length) return;
 
     btnGerar.disabled = true;
     btnLimpar.disabled = true;
@@ -1792,194 +1938,74 @@ https://www.instagram.com/reel/..."></textarea>
     barraGeral.classList.add('mostrar');
     resumo.classList.add('mostrar');
     preenche.style.width = '0%';
+    resumo.textContent = 'Enviando o lote inteiro para o servidor...';
 
     const perfilSel =
       document.getElementById('seletorPerfil').value;
-
     const edicoesExtras =
       document.getElementById('chkEdicoesExtras').checked;
-
     const usarLogo =
       document.getElementById('chkUsarLogo').checked;
 
-    const temFonteSomentePC = fila.some(
-      it => Boolean(it.localOnly)
-    );
-    const loteGrande = fila.length >= 20;
-
-    // V9: lotes grandes nunca caem automaticamente para Railway.
-    // Isso evita uma queda do agente transformar 100 renders locais em
-    // 100 renders de CPU no servidor.
-    const modoEconomicoObrigatorio =
-      temFonteSomentePC || loteGrande;
-
-    let modoLote =
-      await consultarModoGeracaoDoLote();
-
-    if (modoEconomicoObrigatorio && !modoLote.local){
-      resumo.textContent =
-        '⏸ Lote econômico • aguardando o agente do PC...';
-      modoLote = await aguardarAgenteParaLote(
-        msg => resumo.textContent = msg
-      );
-    }
-
-    const concorrencia = modoLote.local
-      ? Math.min(2, modoLote.concorrencia)
-      : 1;
-
-    let proximo = 0;
-    let feitos = 0;
-    let ok = 0;
-    let falhas = 0;
-    let ativos = 0;
-
-    const ids = [];
-    const mensagens = new Map();
-
-    function atualizarResumo(){
-      const modo = modoEconomicoObrigatorio
-        ? `💰 Lote econômico • ⚡ Turbo ${concorrencia}x`
-        : (modoLote.local
-            ? `⚡ Turbo ${concorrencia}x`
-            : '☁️ Railway');
-
-      const partes = [
-        `${modo} • ${feitos}/${fila.length} concluído(s)`
-      ];
-
-      if (ativos > 0){
-        partes.push(`${ativos} processando`);
+    const payloads = fila.map(it => ({
+      id: it.jobId,
+      legenda: usarLegendaHumor ? LEGENDA_HUMOR : it.legenda.trim(),
+      crop: it.box,
+      perfil: perfilSel,
+      uniqueness: {
+        edicoes_extras: edicoesExtras,
+        usar_logo: usarLogo
       }
+    }));
 
-      if (falhas > 0){
-        partes.push(`${falhas} falha(s)`);
-      }
-
-      resumo.textContent = partes.join(' • ');
-      preenche.style.width =
-        `${(feitos / fila.length) * 100}%`;
-    }
-
-    async function processarItem(it, indice){
-      ativos++;
+    for (const it of fila){
       it.estado = 'processando';
+      it.msgErro = '';
+    }
+    render();
+
+    try {
+      const resp = await fetch('/lote-geracao/iniciar', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({itens: payloads})
+      });
+      const dados = await resp.json().catch(() => ({}));
+
+      if (!resp.ok || !dados.lote_id){
+        throw new Error(dados.erro || 'Não foi possível iniciar o lote.');
+      }
+
+      localStorage.setItem(CHAVE_LOTE_ATIVO, dados.lote_id);
+      resumo.textContent =
+        '✓ Lote recebido pelo servidor. Você já pode sair desta tela.';
+
+      await acompanharLoteServidor(dados.lote_id, false);
+
+    } catch (err){
+      for (const it of fila){
+        if (it.estado === 'processando'){
+          it.estado = 'erro';
+          it.msgErro = err.message || 'Falha ao iniciar o lote.';
+        }
+      }
       render();
-      atualizarResumo();
-
-      const payload = {
-        id: it.jobId,
-        legenda: usarLegendaHumor ? LEGENDA_HUMOR : it.legenda.trim(),
-        crop: it.box,
-        perfil: perfilSel,
-        uniqueness: {
-          edicoes_extras: edicoesExtras,
-          usar_logo: usarLogo
-        },
-        local_only: Boolean(it.localOnly)
-      };
-
-      try {
-        const resultadoGeracao =
-          await gerarHibridoTurbo(
-            payload,
-            modoLote.local,
-            mensagem => {
-              mensagens.set(it.localId, mensagem);
-
-              resumo.textContent =
-                `${mensagem} ` +
-                `(${feitos}/${fila.length} concluído(s) • ` +
-                `${ativos} processando)`;
-            },
-            {
-              permitirFallback: !modoEconomicoObrigatorio,
-              esperaLonga: modoEconomicoObrigatorio
-            }
-          );
-
-        it.estado = 'ok';
-        it.modoGeracao = resultadoGeracao.modo;
-
-        ok++;
-        ids.push(it.jobId);
-
-      } catch (err){
-        it.estado = 'erro';
-        it.msgErro = err.message;
-        falhas++;
-
-      } finally {
-        mensagens.delete(it.localId);
-        ativos--;
-        feitos++;
-        render();
-        atualizarResumo();
-      }
-    }
-
-    async function worker(){
-      while (true){
-        const indice = proximo++;
-        if (indice >= fila.length){
-          return;
-        }
-
-        await processarItem(
-          fila[indice],
-          indice
-        );
-      }
-    }
-
-    // Dois workers locais:
-    // enquanto um vídeo final está sendo enviado,
-    // o outro já pode estar sendo renderizado.
-    const workers = Array.from(
-      {length: concorrencia},
-      () => worker()
-    );
-
-    await Promise.all(workers);
-
-    resumo.textContent =
-      `Concluído: ${ok} pronto(s)` +
-      (falhas
-        ? `, ${falhas} falhou(aram).`
-        : '.') +
-      (modoEconomicoObrigatorio
-        ? ' • 💰 sem render no Railway'
-        : (modoLote.local && concorrencia > 1
-            ? ' • Turbo 2x'
-            : ''));
-
-    btnGerar.disabled = false;
-    btnLimpar.disabled = false;
-
-    if (ids.length){
-      btnZip.classList.add('mostrar');
-
-      btnZip.onclick = async e => {
-        e.preventDefault();
-        btnZip.textContent = 'Baixando...';
-
-        for (const id of ids){
-          const a = document.createElement('a');
-          a.href = '/baixar/' + id;
-          a.download = '';
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-
-          await new Promise(
-            r => setTimeout(r, 800)
-          );
-        }
-
-        btnZip.textContent = '⬇ Baixar todos';
-      };
+      resumo.textContent = '✗ ' + (err.message || 'Falha ao iniciar o lote.');
+      btnGerar.disabled = false;
+      btnLimpar.disabled = false;
     }
   });
+
+  // Se a página for fechada/recarregada depois do clique em "Gerar todos",
+  // recupera o lote do servidor. Os vídeos continuam sendo produzidos sem a aba.
+  const lotePendenteAoAbrir = localStorage.getItem(CHAVE_LOTE_ATIVO);
+  if (lotePendenteAoAbrir){
+    setTimeout(
+      () => acompanharLoteServidor(lotePendenteAoAbrir, true),
+      50
+    );
+  }
+
 
 </script>
 </body>
