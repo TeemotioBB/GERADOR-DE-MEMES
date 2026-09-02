@@ -302,6 +302,16 @@ def deep_clean_mp4(input_path, output_path, remove_sei=True):
     return output_path
 
 
+
+def _normalizar_preset_ffmpeg(valor):
+    """Evita presets extremamente lentos no gerador de alto volume."""
+    preset = str(valor or "veryfast").strip().lower()
+    permitidos = {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium"}
+    if preset not in permitidos:
+        return "veryfast"
+    return preset
+
+
 def _normalizar_opcoes_uniqueness(options):
     """Normaliza opções de uniqueness.
 
@@ -352,7 +362,9 @@ def _normalizar_opcoes_uniqueness(options):
         "dynamic_zoom": bool(options.get("dynamic_zoom", True)),
         "speed_factor": speed,
         "crf": crf,
-        "preset": str(options.get("preset", "slow") or "slow"),
+        # veryfast mantém o mesmo CRF/qualidade-alvo, mas reduz bastante o uso
+        # de CPU em comparação com slow. O app.py também força veryfast no Railway.
+        "preset": _normalizar_preset_ffmpeg(options.get("preset", "veryfast")),
         "deep_metadata_clean": bool(options.get("deep_metadata_clean", True)),
         "remove_h264_sei": bool(options.get("remove_h264_sei", True)),
     }
