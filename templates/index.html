@@ -1977,6 +1977,13 @@ https://www.instagram.com/reel/..."></textarea>
       });
       const dados = await resp.json().catch(() => ({}));
 
+      if (resp.status === 404){
+        throw new Error(
+          'Backend desatualizado: a rota /lote-geracao/iniciar não existe. ' +
+          'Substitua também o app.py pela mesma versão do index.html.'
+        );
+      }
+
       if (!resp.ok || !dados.lote_id){
         throw new Error(dados.erro || 'Não foi possível iniciar o lote.');
       }
