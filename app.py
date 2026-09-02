@@ -98,6 +98,14 @@ GERACAO_PC_FILA = []
 GERACAO_PC_STATUS = {}
 COLETA_STALE_SECONDS = int(os.environ.get("COLETA_STALE_SECONDS", "120"))
 
+# ----------------- LOTES DE GERAÇÃO EM SEGUNDO PLANO -----------------
+# O index.html atual envia todos os vídeos de uma vez para /lote-geracao/iniciar
+# e passa a consultar /lote-geracao/status/<lote_id>. O lote continua no servidor
+# mesmo se a aba for fechada/recarregada.
+LOTES_GERACAO_LOCK = threading.Lock()
+LOTES_GERACAO = {}
+LOTE_GERACAO_TTL = int(os.environ.get("LOTE_GERACAO_TTL", "86400"))
+
 
 def _reencaminhar_geracoes_de_sessao_antiga(nova_sessao):
     """
@@ -362,6 +370,401 @@ def _preview_path(job_id):
 
 def _preview_url(job_id):
     return f"/frame/{job_id}"
+
+
+def _limpar_lotes_expirados():
+    """Remove apenas o status de lotes antigos; os arquivos têm limpeza própria."""
+    limite = time.time() - max(3600, LOTE_GERACAO_TTL)
+    with LOTES_GERACAO_LOCK:
+        expirados = [
+            lote_id
+            for lote_id, lote in LOTES_GERACAO.items()
+            if float(lote.get("atualizado_em") or lote.get("criado_em") or 0) < limite
+            and lote.get("estado") in {"concluido", "erro"}
+        ]
+        for lote_id in expirados:
+            LOTES_GERACAO.pop(lote_id, None)
+
+
+def _snapshot_lote(lote_id):
+    with LOTES_GERACAO_LOCK:
+        lote = LOTES_GERACAO.get(lote_id)
+        if not lote:
+            return None
+        return {
+            "lote_id": lote_id,
+            "estado": lote.get("estado", "processando"),
+            "total": int(lote.get("total") or 0),
+            "feitos": int(lote.get("feitos") or 0),
+            "ok": int(lote.get("ok") or 0),
+            "falhas": int(lote.get("falhas") or 0),
+            "modo": lote.get("modo") or "misto",
+            "modo_economico": bool(lote.get("modo_economico", False)),
+            "mensagem": lote.get("mensagem") or "",
+            "ids_prontos": list(lote.get("ids_prontos") or []),
+            "itens": [dict(x) for x in (lote.get("itens") or [])],
+        }
+
+
+def _atualizar_item_lote(lote_id, indice, **campos):
+    with LOTES_GERACAO_LOCK:
+        lote = LOTES_GERACAO.get(lote_id)
+        if not lote:
+            return
+        itens = lote.get("itens") or []
+        if indice < 0 or indice >= len(itens):
+            return
+        itens[indice].update(campos)
+        lote["atualizado_em"] = time.time()
+
+
+def _recontar_lote_locked(lote):
+    itens = lote.get("itens") or []
+    feitos = sum(1 for x in itens if x.get("estado") in {"concluido", "erro"})
+    ok = sum(1 for x in itens if x.get("estado") == "concluido")
+    falhas = sum(1 for x in itens if x.get("estado") == "erro")
+    lote["feitos"] = feitos
+    lote["ok"] = ok
+    lote["falhas"] = falhas
+    lote["ids_prontos"] = [
+        x.get("job_id") for x in itens
+        if x.get("estado") == "concluido" and x.get("job_id")
+    ]
+    lote["atualizado_em"] = time.time()
+
+
+def _marcar_item_lote(lote_id, indice, estado, mensagem=None, erro=None, modo=None):
+    with LOTES_GERACAO_LOCK:
+        lote = LOTES_GERACAO.get(lote_id)
+        if not lote:
+            return
+        itens = lote.get("itens") or []
+        if indice < 0 or indice >= len(itens):
+            return
+        item = itens[indice]
+        item["estado"] = estado
+        if mensagem is not None:
+            item["mensagem"] = str(mensagem)[:1000]
+        if erro is not None:
+            item["erro"] = str(erro)[:2000]
+        if modo is not None:
+            item["modo"] = modo
+        _recontar_lote_locked(lote)
+
+
+def _normalizar_uniqueness_railway(dados):
+    uniqueness_recebida = dados.get("uniqueness")
+    uniqueness = dict(uniqueness_recebida) if isinstance(uniqueness_recebida, dict) else {}
+    defaults_uniqueness = {
+        "edicoes_extras": False,
+        "usar_logo": False,
+        "light_crop": True,
+        "color_adjust": True,
+        "subtle_grain": True,
+        "stronger_visuals": True,
+        "random_flip": True,
+        "vignette": True,
+        "dynamic_zoom": True,
+        "speed_factor": 1.0,
+        "deep_metadata_clean": True,
+        "remove_h264_sei": True,
+    }
+    for chave, valor in defaults_uniqueness.items():
+        uniqueness.setdefault(chave, valor)
+    uniqueness["crf"] = RAILWAY_FFMPEG_CRF
+    uniqueness["preset"] = RAILWAY_FFMPEG_PRESET
+    return uniqueness
+
+
+def _gerar_item_railway_background(dados):
+    """Mesma renderização da rota /gerar, mas sem depender de request Flask."""
+    job_id = dados.get("id")
+    legenda = (dados.get("legenda") or "").strip()
+    crop = dados.get("crop")
+    perfil = dados.get("perfil")
+    uniqueness = _normalizar_uniqueness_railway(dados)
+
+    item = UPLOADS.get(job_id)
+    if not item:
+        raise RuntimeError("Vídeo expirado. Adicione novamente.")
+    if item.get("local_only"):
+        raise RuntimeError(
+            "Este Reel fica somente no PC para economizar Railway. Ligue o agente para gerar."
+        )
+    if not item.get("path") or not os.path.exists(item["path"]):
+        raise RuntimeError("Vídeo expirado. Adicione novamente.")
+    if not legenda:
+        raise RuntimeError("Digite uma legenda.")
+
+    entrada = item["path"]
+    saida = os.path.join(WORK_DIR, f"{job_id}_post.mp4")
+
+    try:
+        with GERACAO_LOCK:
+            retorno = _worker_json(
+                RENDER_WORKER,
+                {
+                    "entrada": entrada,
+                    "saida": saida,
+                    "legenda": legenda,
+                    "crop": crop,
+                    "perfil": perfil,
+                    "uniqueness": uniqueness,
+                },
+                timeout=1800,
+            )
+            if not retorno.get("ok"):
+                raise RuntimeError(str(retorno.get("erro") or "Falha desconhecida no render."))
+    except Exception:
+        try:
+            os.remove(saida)
+        except OSError:
+            pass
+        raise
+
+    if not os.path.isfile(saida):
+        raise RuntimeError("O arquivo final não foi criado.")
+
+    base = os.path.splitext(item.get("nome") or "video")[0]
+    nome_saida = f"post_{base}.mp4"
+    RESULTS[job_id] = {"path": saida, "nome": nome_saida}
+    _limpar_depois([saida], delay=7200, result_ids=[job_id])
+    _liberar_memoria()
+    return job_id
+
+
+def _criar_tarefa_pc_background(dados):
+    job_id = dados.get("id")
+    item = UPLOADS.get(job_id)
+    if not item:
+        raise RuntimeError("Vídeo expirado. Adicione novamente.")
+
+    local_only = bool(item.get("local_only"))
+    if not local_only and (not item.get("path") or not os.path.exists(item["path"])):
+        raise RuntimeError("Vídeo expirado. Adicione novamente.")
+    if not (dados.get("legenda") or "").strip():
+        raise RuntimeError("Digite uma legenda.")
+
+    task_id = uuid.uuid4().hex
+    agora = time.time()
+    with GERACAO_PC_LOCK:
+        GERACAO_PC_STATUS[task_id] = {
+            "task_id": task_id,
+            "job_id": job_id,
+            "estado": "aguardando_agente",
+            "mensagem": "Aguardando o PC iniciar a renderização...",
+            "erro": None,
+            "criado_em": agora,
+            "atualizado_em": agora,
+            "dados": {
+                "id": job_id,
+                "legenda": (dados.get("legenda") or "").strip(),
+                "crop": dados.get("crop"),
+                "perfil": dados.get("perfil"),
+                "uniqueness": dados.get("uniqueness") or {},
+                "nome": item.get("nome") or "video.mp4",
+                "local_only": local_only,
+            },
+            "agente_sessao": None,
+        }
+        GERACAO_PC_FILA.append(task_id)
+    _limpar_depois(delay=86400, task_ids=[task_id])
+    return task_id
+
+
+def _esperar_tarefa_pc_no_lote(lote_id, indice, task_id):
+    """Espera o agente concluir, atualizando a mensagem visível no lote."""
+    while True:
+        with GERACAO_PC_LOCK:
+            tarefa = GERACAO_PC_STATUS.get(task_id)
+            if not tarefa:
+                raise RuntimeError("A tarefa do PC expirou antes de terminar.")
+            estado = tarefa.get("estado")
+            mensagem = tarefa.get("mensagem") or "Processando no PC..."
+            erro = tarefa.get("erro")
+
+        if estado == "concluido":
+            return
+        if estado == "erro":
+            raise RuntimeError(erro or mensagem or "Falha na renderização pelo PC.")
+
+        _atualizar_item_lote(
+            lote_id,
+            indice,
+            estado="processando",
+            mensagem=mensagem,
+            modo="pc",
+        )
+        time.sleep(1.0)
+
+
+def _processar_lote_geracao(lote_id, payloads):
+    modos_usados = set()
+
+    for indice, dados in enumerate(payloads):
+        job_id = dados.get("id")
+        modo_atual = None
+        try:
+            item_upload = UPLOADS.get(job_id)
+            if not item_upload:
+                raise RuntimeError("Vídeo expirado. Adicione novamente.")
+
+            local_only = bool(item_upload.get("local_only"))
+            with AUTOMACAO_LOCK:
+                pc_online = _agente_pode_gerar_locked()
+
+            # Arquivos local_only nunca podem cair no Railway. Para os demais,
+            # usa o PC quando ele está online; caso contrário, renderiza no Railway.
+            usar_pc = local_only or pc_online
+
+            if usar_pc:
+                modo_atual = "pc"
+                modos_usados.add("pc")
+                _marcar_item_lote(
+                    lote_id, indice, "processando",
+                    mensagem=(
+                        "Aguardando o agente do PC..." if not pc_online
+                        else "Enviado para renderização no PC..."
+                    ),
+                    erro="",
+                    modo="pc",
+                )
+                task_id = _criar_tarefa_pc_background(dados)
+                _esperar_tarefa_pc_no_lote(lote_id, indice, task_id)
+            else:
+                modo_atual = "railway"
+                modos_usados.add("railway")
+                _marcar_item_lote(
+                    lote_id, indice, "processando",
+                    mensagem="Renderizando no Railway...",
+                    erro="",
+                    modo="railway",
+                )
+                _gerar_item_railway_background(dados)
+
+            _marcar_item_lote(
+                lote_id, indice, "concluido",
+                mensagem="Vídeo pronto.", erro="",
+                modo="pc" if usar_pc else "railway",
+            )
+
+        except Exception as exc:
+            _marcar_item_lote(
+                lote_id, indice, "erro",
+                mensagem="Falha ao gerar.", erro=str(exc),
+                modo=modo_atual,
+            )
+
+        with LOTES_GERACAO_LOCK:
+            lote = LOTES_GERACAO.get(lote_id)
+            if lote:
+                _recontar_lote_locked(lote)
+                lote["mensagem"] = (
+                    f'{lote["feitos"]}/{lote["total"]} vídeo(s) processado(s).'
+                )
+
+    with LOTES_GERACAO_LOCK:
+        lote = LOTES_GERACAO.get(lote_id)
+        if not lote:
+            return
+        _recontar_lote_locked(lote)
+        if modos_usados == {"pc"}:
+            lote["modo"] = "pc"
+            lote["modo_economico"] = True
+        elif modos_usados == {"railway"}:
+            lote["modo"] = "railway"
+            lote["modo_economico"] = False
+        else:
+            lote["modo"] = "misto"
+            lote["modo_economico"] = False
+
+        lote["estado"] = "erro" if lote["ok"] == 0 and lote["falhas"] else "concluido"
+        lote["mensagem"] = (
+            f'Concluído: {lote["ok"]} pronto(s)'
+            + (f', {lote["falhas"]} falhou(aram).' if lote["falhas"] else '.')
+        )
+        lote["atualizado_em"] = time.time()
+
+
+@app.route("/lote-geracao/iniciar", methods=["POST"])
+def lote_geracao_iniciar():
+    _limpar_lotes_expirados()
+    dados = request.get_json(silent=True) or {}
+    payloads = dados.get("itens")
+    if not isinstance(payloads, list) or not payloads:
+        return jsonify({"erro": "Nenhum vídeo válido foi enviado para o lote."}), 400
+    if len(payloads) > 200:
+        return jsonify({"erro": "O lote aceita no máximo 200 vídeos por vez."}), 400
+
+    limpos = []
+    status_itens = []
+    for bruto in payloads:
+        if not isinstance(bruto, dict):
+            continue
+        job_id = str(bruto.get("id") or "").strip()
+        legenda = str(bruto.get("legenda") or "").strip()
+        if not job_id or not legenda:
+            continue
+        payload = {
+            "id": job_id,
+            "legenda": legenda,
+            "crop": bruto.get("crop"),
+            "perfil": bruto.get("perfil"),
+            "uniqueness": bruto.get("uniqueness") or {},
+        }
+        limpos.append(payload)
+        status_itens.append({
+            "job_id": job_id,
+            "estado": "aguardando",
+            "mensagem": "Na fila do lote...",
+            "erro": "",
+            "modo": None,
+        })
+
+    if not limpos:
+        return jsonify({"erro": "Nenhum item do lote possui id e legenda válidos."}), 400
+
+    lote_id = uuid.uuid4().hex
+    agora = time.time()
+    with LOTES_GERACAO_LOCK:
+        LOTES_GERACAO[lote_id] = {
+            "lote_id": lote_id,
+            "estado": "processando",
+            "total": len(limpos),
+            "feitos": 0,
+            "ok": 0,
+            "falhas": 0,
+            "modo": "misto",
+            "modo_economico": False,
+            "mensagem": "Lote recebido. Iniciando geração em segundo plano...",
+            "ids_prontos": [],
+            "itens": status_itens,
+            "criado_em": agora,
+            "atualizado_em": agora,
+        }
+
+    threading.Thread(
+        target=_processar_lote_geracao,
+        args=(lote_id, limpos),
+        daemon=True,
+        name=f"lote-geracao-{lote_id[:8]}",
+    ).start()
+
+    return jsonify({
+        "ok": True,
+        "lote_id": lote_id,
+        "total": len(limpos),
+        "mensagem": "Lote recebido. A geração continua mesmo se você sair desta tela.",
+    }), 202
+
+
+@app.route("/lote-geracao/status/<lote_id>")
+def lote_geracao_status(lote_id):
+    _limpar_lotes_expirados()
+    dados = _snapshot_lote(lote_id)
+    if not dados:
+        return jsonify({"erro": "Lote inexistente ou expirado."}), 404
+    return jsonify(dados)
 
 
 @app.route("/")
