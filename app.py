@@ -33,6 +33,14 @@ MAX_VIDEO_UPLOAD_BYTES = MAX_VIDEO_UPLOAD_MB * 1024 * 1024
 MAX_LEGENDA_BODY_BYTES = MAX_LEGENDA_BODY_MB * 1024 * 1024
 app.config["MAX_CONTENT_LENGTH"] = MAX_VIDEO_UPLOAD_BYTES
 
+# Render do Railway: preset muito mais rápido, mantendo CRF 18.
+# Pode ser alterado por variável de ambiente sem mexer no código.
+_PRESETS_RAPIDOS = {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium"}
+RAILWAY_FFMPEG_PRESET = os.environ.get("RAILWAY_FFMPEG_PRESET", "veryfast").strip().lower()
+if RAILWAY_FFMPEG_PRESET not in _PRESETS_RAPIDOS:
+    RAILWAY_FFMPEG_PRESET = "veryfast"
+RAILWAY_FFMPEG_CRF = 18
+
 WORK_DIR = os.path.join(tempfile.gettempdir(), "gerador_memes")
 os.makedirs(WORK_DIR, exist_ok=True)
 PREVIEW_DIR = os.path.join(WORK_DIR, "previews")
@@ -1454,26 +1462,32 @@ def gerar():
     perfil = dados.get("perfil")
 
     # === OPÇÕES DE ANTI-DETECÇÃO / UNIQUENESS ===
-    uniqueness = dados.get("uniqueness", {})
-    # Padrão: edições extras e logo DESLIGADAS.
-    # A interface pode enviar edicoes_extras=true e/ou usar_logo=true.
-    if not uniqueness:
-        uniqueness = {
-            "edicoes_extras": False,
-            "usar_logo": False,
-            "light_crop": True,
-            "color_adjust": True,
-            "subtle_grain": True,
-            "stronger_visuals": True,
-            "random_flip": True,
-            "vignette": True,
-            "dynamic_zoom": True,
-            "speed_factor": 1.0,
-            "crf": 18,
-            "preset": "slow",
-            "deep_metadata_clean": True,
-            "remove_h264_sei": True
-        }
+    # Mantém exatamente as opções visuais enviadas pela interface, mas o fallback
+    # do Railway SEMPRE usa uma codificação rápida. Assim um navegador antigo que
+    # ainda envie preset=slow não volta a deixar cada vídeo extremamente demorado.
+    uniqueness_recebida = dados.get("uniqueness")
+    uniqueness = dict(uniqueness_recebida) if isinstance(uniqueness_recebida, dict) else {}
+
+    defaults_uniqueness = {
+        "edicoes_extras": False,
+        "usar_logo": False,
+        "light_crop": True,
+        "color_adjust": True,
+        "subtle_grain": True,
+        "stronger_visuals": True,
+        "random_flip": True,
+        "vignette": True,
+        "dynamic_zoom": True,
+        "speed_factor": 1.0,
+        "deep_metadata_clean": True,
+        "remove_h264_sei": True,
+    }
+    for chave, valor in defaults_uniqueness.items():
+        uniqueness.setdefault(chave, valor)
+
+    # Qualidade permanece alta (CRF 18); só reduzimos o esforço de compressão.
+    uniqueness["crf"] = RAILWAY_FFMPEG_CRF
+    uniqueness["preset"] = RAILWAY_FFMPEG_PRESET
 
     item = UPLOADS.get(job_id)
     if not item:
