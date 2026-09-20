@@ -215,7 +215,7 @@ COLOR_CAPTION = (15, 20, 25)
 
 # ----------------- IDENTIDADE VISUAL EXCLUSIVA @adultosofrido -----------------
 # Nada aqui é aplicado aos outros perfis.
-ADULTO_VISUAL_ATIVO = True
+ADULTO_VISUAL_ATIVO = False
 # VERSAO_VISUAL = "adultosofrido_cta_texto_menor_v1"
 ADULTO_CTA_TEXTO_1 = "GOSTOU?"
 ADULTO_CTA_TEXTO_2 = "SIGA A PÁGINA"
