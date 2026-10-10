@@ -1422,42 +1422,84 @@ def detectar():
         return jsonify({"erro": f"Falha ao analisar: {e}"}), 500
 
 
-@app.route("/importar-instagram", methods=["POST"])
-def importar_instagram():
-    dados = request.get_json(silent=True) or {}
-    url = (dados.get("url") or "").strip()
-    job_id = uuid.uuid4().hex
-    entrada = None
+# Importação assíncrona: a resposta HTTP não fica aberta durante yt-dlp/FFmpeg.
+# Estado em memória (Railway com 1 worker); um reinício interrompe tarefas em andamento.
+IMPORTACOES_LOCK = threading.Lock()
+IMPORTACOES = {}
+IMPORTACOES_SEMAFORO = threading.BoundedSemaphore(2)
+IMPORTACOES_TTL = 3600
 
+
+def _executar_importacao_instagram(job_id, url):
+    entrada = None
     try:
-        retorno = _worker_json(
-            INSTAGRAM_WORKER,
-            {
+        with IMPORTACOES_SEMAFORO:
+            with IMPORTACOES_LOCK:
+                IMPORTACOES[job_id]["estado"] = "baixando"
+            retorno = _worker_json(INSTAGRAM_WORKER, {
                 "url": url,
                 "pasta_destino": WORK_DIR,
                 "identificador": job_id,
                 "limite_mb": MAX_VIDEO_UPLOAD_MB,
-            },
-            timeout=300,
-        )
-        if not retorno.get("ok"):
-            return jsonify({"erro": str(retorno.get("erro") or "Falha ao importar o Reels.")}), 400
-
-        entrada = str(retorno.get("path") or "")
-        nome = str(retorno.get("nome") or "reel.mp4")
-        if not entrada or not os.path.isfile(entrada):
-            raise RuntimeError("O importador não retornou o vídeo baixado.")
-
-        return jsonify(_analisar_arquivo(entrada, nome, job_id))
-    except Exception as e:
+            }, timeout=300)
+            if not retorno.get("ok"):
+                raise RuntimeError(str(retorno.get("erro") or "Falha ao importar o Reels."))
+            entrada = str(retorno.get("path") or "")
+            nome = str(retorno.get("nome") or "reel.mp4")
+            if not entrada or not os.path.isfile(entrada):
+                raise RuntimeError("O importador não retornou o vídeo baixado.")
+            with IMPORTACOES_LOCK:
+                IMPORTACOES[job_id]["estado"] = "analisando"
+            resultado = _analisar_arquivo(entrada, nome, job_id)
+            with IMPORTACOES_LOCK:
+                IMPORTACOES[job_id].update(estado="concluido", resultado=resultado)
+    except Exception as exc:
         if entrada:
             try:
                 os.remove(entrada)
             except OSError:
                 pass
-        return jsonify({"erro": f"Falha ao importar o Reels: {e}"}), 500
+        with IMPORTACOES_LOCK:
+            IMPORTACOES[job_id].update(estado="erro", erro=str(exc))
     finally:
         _liberar_memoria()
+
+
+@app.route("/importar-instagram", methods=["POST"])
+def importar_instagram():
+    dados = request.get_json(silent=True) or {}
+    url = str(dados.get("url") or "").strip()
+    if not url or len(url) > 2048 or not __import__("re").match(
+        r"^https?://(?:www\.)?instagram\.com/(?:reel|reels|p)/[A-Za-z0-9_-]+", url, __import__("re").I
+    ):
+        return jsonify({"erro": "Informe um link válido de Reels do Instagram."}), 400
+    agora = time.time()
+    with IMPORTACOES_LOCK:
+        for chave, tarefa in list(IMPORTACOES.items()):
+            if agora - tarefa["criado_em"] > IMPORTACOES_TTL and tarefa["estado"] in ("erro", "concluido"):
+                IMPORTACOES.pop(chave, None)
+        ativas = sum(t["estado"] not in ("erro", "concluido") for t in IMPORTACOES.values())
+        if ativas >= 4:
+            return jsonify({"erro": "Há muitas importações em andamento. Tente novamente em instantes."}), 429
+        job_id = uuid.uuid4().hex
+        IMPORTACOES[job_id] = {"estado": "aguardando", "criado_em": agora}
+    threading.Thread(target=_executar_importacao_instagram, args=(job_id, url), daemon=True,
+                     name=f"importar-reel-{job_id[:8]}").start()
+    return jsonify({"job_id": job_id, "estado": "aguardando"}), 202
+
+
+@app.route("/importar-instagram/status/<job_id>", methods=["GET"])
+def status_importacao_instagram(job_id):
+    with IMPORTACOES_LOCK:
+        tarefa = IMPORTACOES.get(job_id)
+        if not tarefa:
+            return jsonify({"erro": "Importação não encontrada. O servidor pode ter reiniciado; tente novamente."}), 404
+        resposta = {"estado": tarefa["estado"]}
+        if tarefa["estado"] == "concluido":
+            resposta["resultado"] = tarefa["resultado"]
+        elif tarefa["estado"] == "erro":
+            resposta["erro"] = tarefa.get("erro") or "Não foi possível importar o Reels."
+    return jsonify(resposta)
 
 
 @app.route("/ler-legenda", methods=["POST"])
