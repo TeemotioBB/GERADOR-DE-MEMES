@@ -2,8 +2,8 @@
 """Importação de Reels públicos do Instagram usando yt-dlp.
 
 O Instagram pode devolver uma resposta vazia para IPs de datacenter, mesmo
-quando o Reels é público. Este módulo tenta primeiro sem autenticação e, se
-necessário, repete usando cookies armazenados em variável do Railway.
+quando o Reels é público. Este módulo prioriza cookies armazenados em variável do Railway, quando presentes,
+e tenta anonimamente apenas quando não existe sessão configurada.
 
 Variáveis aceitas:
 - INSTAGRAM_COOKIES_B64: conteúdo de cookies.txt codificado em Base64 (recomendado)
@@ -233,54 +233,47 @@ def baixar_video_instagram(
     info: dict | None = None
 
     try:
-        # Primeiro tenta anonimamente, evitando usar cookies sem necessidade.
+        # Evita solicitar posts anonimamente quando há uma sessão configurada.
+        cookiefile = _criar_arquivo_cookies_temporario()
+        if cookiefile:
+            # Validar estrutura antes da solicitação; não imprimir cookies nem valores.
+            with open(cookiefile, encoding="utf-8") as f:
+                linhas = [l.rstrip("\n") for l in f if l.strip() and not l.startswith("#")]
+            entradas = [l.split("\t") for l in linhas]
+            cookies_ig = [e for e in entradas if len(e) >= 7 and e[0].lstrip(".").endswith("instagram.com")]
+            nomes = {e[5] for e in cookies_ig}
+            if "sessionid" not in nomes:
+                raise InstagramImportError(
+                    "INSTAGRAM_COOKIES_B64 foi lido, mas não contém sessionid para instagram.com. "
+                    "Exporte novamente os cookies com o Instagram conectado."
+                )
         try:
             info = _executar_download(
-                url_limpa, template, limite_bytes, limite_mb, cookiefile=None
+                url_limpa, template, limite_bytes, limite_mb, cookiefile=cookiefile
             )
-        except yt_dlp.utils.DownloadError as primeiro_erro:
-            mensagem = str(primeiro_erro)
+        except yt_dlp.utils.DownloadError as erro:
+            mensagem = str(erro)
             if "limite" in mensagem.lower() or "too large" in mensagem.lower():
                 raise InstagramImportError(
                     f"O vídeo ultrapassa o limite de {limite_mb} MB."
-                ) from primeiro_erro
-
-            if not _erro_pede_autenticacao(mensagem):
+                ) from erro
+            if _erro_pede_autenticacao(mensagem):
+                if cookiefile:
+                    raise InstagramImportError(
+                        "O Instagram recusou a sessão enviada pelo Railway. "
+                        "O cookie sessionid está presente, mas pode ter expirado ou sido bloqueado, "
+                        "ou o IP do servidor pode estar limitado. Atualize os cookies e tente novamente mais tarde. "
+                        f"Detalhe: {_detalhe(mensagem)}"
+                    ) from erro
                 raise InstagramImportError(
-                    "Não foi possível importar esse Reels. Confirme o link e tente novamente. "
+                    "O Instagram exige autenticação para esse download. "
+                    "Configure INSTAGRAM_COOKIES_B64 com os cookies de uma sessão ativa. "
                     f"Detalhe: {_detalhe(mensagem)}"
-                ) from primeiro_erro
-
-            # IPs de nuvem podem receber resposta vazia mesmo para posts públicos.
-            cookiefile = _criar_arquivo_cookies_temporario()
-            if not cookiefile:
-                raise InstagramImportError(
-                    "O Instagram bloqueou a importação pelo servidor do Railway. "
-                    "Configure a variável INSTAGRAM_COOKIES_B64 e tente novamente."
-                ) from primeiro_erro
-
-            try:
-                info = _executar_download(
-                    url_limpa, template, limite_bytes, limite_mb, cookiefile=cookiefile
-                )
-            except yt_dlp.utils.DownloadError as segundo_erro:
-                mensagem2 = str(segundo_erro)
-                if "limite" in mensagem2.lower() or "too large" in mensagem2.lower():
-                    raise InstagramImportError(
-                        f"O vídeo ultrapassa o limite de {limite_mb} MB."
-                    ) from segundo_erro
-                if _erro_pede_autenticacao(mensagem2):
-                    raise InstagramImportError(
-                        "O Instagram devolveu erro de autenticação (401/403) mesmo com cookies. "
-                        "Confira se INSTAGRAM_COOKIES_B64 contém uma sessão válida e se o Reels "
-                        "abre nessa conta. Se os cookies estiverem válidos, o Instagram pode estar "
-                        "recusando o IP do Railway; isso não pode ser resolvido apenas com CORS. "
-                        f"Detalhe: {_detalhe(mensagem2)}"
-                    ) from segundo_erro
-                raise InstagramImportError(
-                    "O Instagram recusou esse download mesmo com autenticação. "
-                    f"Detalhe: {_detalhe(mensagem2)}"
-                ) from segundo_erro
+                ) from erro
+            raise InstagramImportError(
+                "Não foi possível importar esse Reels. Confirme o link e tente novamente. "
+                f"Detalhe: {_detalhe(mensagem)}"
+            ) from erro
 
         titulo = ((info or {}).get("title") or (info or {}).get("id") or "reel_instagram").strip()
 
