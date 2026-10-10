@@ -16,11 +16,15 @@ from __future__ import annotations
 import base64
 import os
 import re
+import shutil
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
 import yt_dlp
+from yt_dlp.version import __version__ as YT_DLP_VERSION
 
 
 class InstagramImportError(RuntimeError):
@@ -142,11 +146,6 @@ def _opcoes_yt_dlp(
         "restrictfilenames": True,
         "cachedir": False,
         "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/150.0.0.0 Safari/537.36"
-            ),
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         },
     }
@@ -177,6 +176,82 @@ def _executar_download(
         return ydl.extract_info(url, download=True)
 
 
+def _diagnosticar(erro: Exception | str) -> str:
+    """Classifica causas sem publicar links de mídia assinados ou sessões."""
+    mensagem = str(erro).lower()
+    if any(x in mensagem for x in ("429", "too many requests", "rate limit", "rate-limit")):
+        return "LIMITACAO_429"
+    if any(x in mensagem for x in ("403", "forbidden", "access denied")):
+        return "ACESSO_403"
+    if any(x in mensagem for x in ("404", "not found")):
+        return "NAO_ENCONTRADO_404"
+    if any(x in mensagem for x in ("401", "login required", "you need to log in", "cookies are invalid", "authentication", "challenge_required")):
+        return "AUTENTICACAO"
+    if any(x in mensagem for x in ("empty media response", "empty response")):
+        return "RESPOSTA_VAZIA"
+    if any(x in mensagem for x in ("unsupported url", "unsupported site")):
+        return "LINK_NAO_SUPORTADO"
+    if any(x in mensagem for x in ("no video formats", "requested format is not available")):
+        return "SEM_FORMATO"
+    if any(x in mensagem for x in ("ffmpeg", "ffprobe")):
+        return "FFMPEG"
+    if any(x in mensagem for x in ("timeout", "timed out", "connection", "network", "ssl")):
+        return "REDE"
+    return "FALHA_EXTRACAO"
+
+
+def _log_diagnostico(etapa: str, erro: Exception | str = "") -> None:
+    """Logs deliberadamente não incluem cookies, URLs, cabeçalhos ou IDs."""
+    categoria = "SUCESSO" if etapa.endswith("_sucesso") else _diagnosticar(erro)
+    print(
+        f"[INSTAGRAM_DIAG] etapa={etapa} categoria={categoria} "
+        f"yt_dlp={YT_DLP_VERSION}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _executar_gallery_dl(
+    url: str,
+    pasta: Path,
+    identificador: str,
+    limite_bytes: int,
+    limite_mb: int,
+    cookiefile: str | None,
+) -> dict:
+    """Fallback com extrator independente, mantendo o arquivo MP4 no fluxo existente."""
+    pasta_temporaria = pasta / f"{identificador}_galeria"
+    pasta_temporaria.mkdir(parents=True, exist_ok=True)
+    try:
+        cmd = [
+            sys.executable, "-m", "gallery_dl", "--config-ignore", "--no-input",
+            "--directory", str(pasta_temporaria),
+        ]
+        if cookiefile:
+            cmd.extend(["--cookies", cookiefile])
+        cmd.append(url)
+        try:
+            processo = subprocess.run(cmd, capture_output=True, text=True, timeout=105)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("timeout ao tentar o segundo extrator") from exc
+        videos = [
+            f for f in pasta_temporaria.rglob("*.mp4")
+            if f.is_file() and f.stat().st_size > 0
+        ]
+        if not videos:
+            # O erro bruto pode conter links de mídia temporários e não será
+            # retornado nem registrado. Só a classificação fica disponível.
+            raise RuntimeError((processo.stderr or processo.stdout or "Nenhum MP4")[-2000:])
+        video = max(videos, key=lambda f: f.stat().st_size)
+        if video.stat().st_size > limite_bytes:
+            raise InstagramImportError(f"O vídeo ultrapassa o limite de {limite_mb} MB.")
+        destino = pasta / f"{identificador}_instagram.mp4"
+        os.replace(video, destino)
+        return {"title": "reel_instagram", "id": identificador}
+    finally:
+        shutil.rmtree(pasta_temporaria, ignore_errors=True)
+
+
 def baixar_video_instagram(
     url: str,
     pasta_destino: str,
@@ -195,49 +270,53 @@ def baixar_video_instagram(
     info: dict | None = None
 
     try:
-        # Primeiro tenta anonimamente, evitando usar cookies sem necessidade.
+        erros = []
+        # Tentativa 1: acesso público. Não consumimos a sessão se não for preciso.
         try:
             info = _executar_download(
                 url_limpa, template, limite_bytes, limite_mb, cookiefile=None
             )
-        except yt_dlp.utils.DownloadError as primeiro_erro:
-            mensagem = str(primeiro_erro)
-            if "limite" in mensagem.lower() or "too large" in mensagem.lower():
-                raise InstagramImportError(
-                    f"O vídeo ultrapassa o limite de {limite_mb} MB."
-                ) from primeiro_erro
+        except yt_dlp.utils.DownloadError as erro_anonimo:
+            if "limite" in str(erro_anonimo).lower() or "too large" in str(erro_anonimo).lower():
+                raise InstagramImportError(f"O vídeo ultrapassa o limite de {limite_mb} MB.") from erro_anonimo
+            erros.append(f"yt_dlp_publico={_diagnosticar(erro_anonimo)}")
+            _log_diagnostico("yt_dlp_publico", erro_anonimo)
 
-            if not _erro_pede_autenticacao(mensagem):
-                raise InstagramImportError(
-                    "Não foi possível importar esse Reels. Confirme o link e tente novamente."
-                ) from primeiro_erro
-
-            # IPs de nuvem podem receber resposta vazia mesmo para posts públicos.
+            # Tentativa 2: mesma ferramenta com cookies, se disponíveis.
             cookiefile = _criar_arquivo_cookies_temporario()
-            if not cookiefile:
-                raise InstagramImportError(
-                    "O Instagram bloqueou a importação pelo servidor do Railway. "
-                    "Configure a variável INSTAGRAM_COOKIES_B64 e tente novamente."
-                ) from primeiro_erro
+            if cookiefile:
+                try:
+                    info = _executar_download(
+                        url_limpa, template, limite_bytes, limite_mb, cookiefile=cookiefile
+                    )
+                except yt_dlp.utils.DownloadError as erro_autenticado:
+                    if "limite" in str(erro_autenticado).lower() or "too large" in str(erro_autenticado).lower():
+                        raise InstagramImportError(f"O vídeo ultrapassa o limite de {limite_mb} MB.") from erro_autenticado
+                    erros.append(f"yt_dlp_cookies={_diagnosticar(erro_autenticado)}")
+                    _log_diagnostico("yt_dlp_cookies", erro_autenticado)
+            else:
+                erros.append("cookies=NAO_CONFIGURADOS")
 
-            try:
-                info = _executar_download(
-                    url_limpa, template, limite_bytes, limite_mb, cookiefile=cookiefile
-                )
-            except yt_dlp.utils.DownloadError as segundo_erro:
-                mensagem2 = str(segundo_erro)
-                if "limite" in mensagem2.lower() or "too large" in mensagem2.lower():
+            if info is None:
+                # Tentativa 3: mecanismo independente do yt-dlp. Não depende
+                # de cookies válidos se o Instagram permitir acesso público.
+                try:
+                    info = _executar_gallery_dl(
+                        url_limpa, pasta, identificador, limite_bytes, limite_mb, cookiefile
+                    )
+                    _log_diagnostico("gallery_dl_sucesso")
+                except InstagramImportError:
+                    raise
+                except Exception as erro_alternativo:
+                    erros.append(f"gallery_dl={_diagnosticar(erro_alternativo)}")
+                    _log_diagnostico("gallery_dl", erro_alternativo)
+                    detalhes = ", ".join(erros)
                     raise InstagramImportError(
-                        f"O vídeo ultrapassa o limite de {limite_mb} MB."
-                    ) from segundo_erro
-                if _erro_pede_autenticacao(mensagem2):
-                    raise InstagramImportError(
-                        "Os cookies do Instagram expiraram ou foram recusados. "
-                        "Exporte um cookies.txt novo e atualize INSTAGRAM_COOKIES_B64 no Railway."
-                    ) from segundo_erro
-                raise InstagramImportError(
-                    "O Instagram recusou esse download mesmo com autenticação. Tente novamente mais tarde."
-                ) from segundo_erro
+                        "Não foi possível importar este Reels usando nenhum dos dois extratores. "
+                        f"Diagnóstico: {detalhes}. "
+                        "Se o erro persistir com vídeos públicos, pode haver restrição do Instagram "
+                        "ao servidor do Railway."
+                    ) from erro_alternativo
 
         titulo = ((info or {}).get("title") or (info or {}).get("id") or "reel_instagram").strip()
 
