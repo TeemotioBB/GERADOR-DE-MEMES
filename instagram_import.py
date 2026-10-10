@@ -22,6 +22,15 @@ from urllib.parse import urlparse
 
 import yt_dlp
 
+# curl-cffi permite ao yt-dlp imitar o TLS de um navegador real.
+try:
+    import curl_cffi  # noqa: F401
+    from yt_dlp.networking.impersonate import ImpersonateTarget
+    _TEM_IMPERSONATE = True
+except Exception:
+    ImpersonateTarget = None
+    _TEM_IMPERSONATE = False
+
 
 class InstagramImportError(RuntimeError):
     """Erro esperado e seguro para mostrar ao usuário."""
@@ -114,11 +123,18 @@ def _erro_pede_autenticacao(mensagem: str) -> bool:
     return any(sinal in texto for sinal in sinais)
 
 
+def _detalhe(mensagem: str) -> str:
+    """Trecho final da mensagem real do yt-dlp, sem códigos de cor ANSI."""
+    limpa = re.sub(r"\x1b\[[0-9;]*m", "", mensagem or "").strip()
+    return limpa[-300:]
+
+
 def _opcoes_yt_dlp(
     template: str,
     limite_bytes: int,
     limite_mb: int,
     cookiefile: str | None,
+    usar_impersonate: bool = True,
 ) -> dict:
     def rejeitar_grande(info, *, incomplete=False):
         del incomplete
@@ -129,7 +145,9 @@ def _opcoes_yt_dlp(
 
     opcoes = {
         "outtmpl": template,
-        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best",
+        # Fallbacks amplos: se o Instagram mudar os formatos, não falha por
+        # "Requested format is not available".
+        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b/best",
         "merge_output_format": "mp4",
         "noplaylist": True,
         "quiet": True,
@@ -141,15 +159,15 @@ def _opcoes_yt_dlp(
         "match_filter": rejeitar_grande,
         "restrictfilenames": True,
         "cachedir": False,
+        # Sem User-Agent fixo: um UA que não bate com a impressão digital TLS
+        # é sinal clássico de bot. O yt-dlp/curl-cffi cuida disso.
         "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/150.0.0.0 Safari/537.36"
-            ),
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         },
     }
+
+    if usar_impersonate and _TEM_IMPERSONATE:
+        opcoes["impersonate"] = ImpersonateTarget("chrome")
 
     if cookiefile:
         opcoes["cookiefile"] = cookiefile
@@ -167,14 +185,28 @@ def _executar_download(
     limite_mb: int,
     cookiefile: str | None,
 ) -> dict:
-    opcoes = _opcoes_yt_dlp(
-        template=template,
-        limite_bytes=limite_bytes,
-        limite_mb=limite_mb,
-        cookiefile=cookiefile,
-    )
-    with yt_dlp.YoutubeDL(opcoes) as ydl:
-        return ydl.extract_info(url, download=True)
+    def _rodar(usar_impersonate: bool) -> dict:
+        opcoes = _opcoes_yt_dlp(
+            template=template,
+            limite_bytes=limite_bytes,
+            limite_mb=limite_mb,
+            cookiefile=cookiefile,
+            usar_impersonate=usar_impersonate,
+        )
+        with yt_dlp.YoutubeDL(opcoes) as ydl:
+            return ydl.extract_info(url, download=True)
+
+    if not _TEM_IMPERSONATE:
+        return _rodar(False)
+
+    try:
+        return _rodar(True)
+    except Exception as exc:
+        # Se o impersonate não for suportado pelo ambiente (versão do
+        # curl-cffi incompatível, alvo indisponível), tenta sem ele.
+        if "impersonat" in str(exc).lower():
+            return _rodar(False)
+        raise
 
 
 def baixar_video_instagram(
@@ -209,7 +241,8 @@ def baixar_video_instagram(
 
             if not _erro_pede_autenticacao(mensagem):
                 raise InstagramImportError(
-                    "Não foi possível importar esse Reels. Confirme o link e tente novamente."
+                    "Não foi possível importar esse Reels. Confirme o link e tente novamente. "
+                    f"Detalhe: {_detalhe(mensagem)}"
                 ) from primeiro_erro
 
             # IPs de nuvem podem receber resposta vazia mesmo para posts públicos.
@@ -233,10 +266,12 @@ def baixar_video_instagram(
                 if _erro_pede_autenticacao(mensagem2):
                     raise InstagramImportError(
                         "Os cookies do Instagram expiraram ou foram recusados. "
-                        "Exporte um cookies.txt novo e atualize INSTAGRAM_COOKIES_B64 no Railway."
+                        "Exporte um cookies.txt novo e atualize INSTAGRAM_COOKIES_B64 no Railway. "
+                        f"Detalhe: {_detalhe(mensagem2)}"
                     ) from segundo_erro
                 raise InstagramImportError(
-                    "O Instagram recusou esse download mesmo com autenticação. Tente novamente mais tarde."
+                    "O Instagram recusou esse download mesmo com autenticação. "
+                    f"Detalhe: {_detalhe(mensagem2)}"
                 ) from segundo_erro
 
         titulo = ((info or {}).get("title") or (info or {}).get("id") or "reel_instagram").strip()
