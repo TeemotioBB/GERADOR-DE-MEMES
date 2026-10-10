@@ -21,6 +21,7 @@ import gc
 import ctypes
 import binascii
 import base64
+import secrets
 from flask import Flask, request, send_file, render_template, jsonify
 from werkzeug.utils import secure_filename
 
@@ -69,6 +70,39 @@ ANALISE_LOCK = threading.Lock()
 # e envia os arquivos para o Railway analisar. O Railway não precisa acessar
 # o Instagram durante a automação.
 AUTOMACAO_TOKEN = os.environ.get("AUTOMACAO_TOKEN", "").strip()
+
+# Importador individual de Reels: o Railway recebe o link, o PC baixa e envia o MP4.
+# Não disponibilize o token no HTML nem no repositório Git.
+IMPORTADOR_PC_TOKEN = os.environ.get("IMPORTADOR_PC_TOKEN", "").strip()
+IMPORTADOR_PC_LOCK = threading.Lock()
+IMPORTADOR_PC_JOBS = {}
+IMPORTADOR_PC_ULTIMO_PING = 0.0
+IMPORTADOR_PC_ONLINE_SEGUNDOS = 35
+IMPORTADOR_PC_JOB_TTL = 3600
+
+
+def _pc_import_autorizado():
+    recebido = _token_recebido()
+    if not IMPORTADOR_PC_TOKEN or not secrets.compare_digest(recebido, IMPORTADOR_PC_TOKEN):
+        return False
+    return True
+
+
+def _pc_import_online_locked():
+    return bool(IMPORTADOR_PC_ULTIMO_PING and time.time() - IMPORTADOR_PC_ULTIMO_PING < IMPORTADOR_PC_ONLINE_SEGUNDOS)
+
+
+def _pc_import_limpar_locked():
+    agora = time.time()
+    for job_id, job in list(IMPORTADOR_PC_JOBS.items()):
+        estado = job.get("estado")
+        tempo = agora - job.get("atualizado", agora)
+        if estado in {"concluido", "erro"} and tempo > IMPORTADOR_PC_JOB_TTL:
+            IMPORTADOR_PC_JOBS.pop(job_id, None)
+        elif estado == "processando" and tempo > 600:
+            job["estado"] = "aguardando_pc"
+            job["atualizado"] = agora
+
 
 AUTOMACAO_LOCK = threading.Lock()
 AUTOMACAO_STATUS = {
@@ -1430,38 +1464,141 @@ def detectar():
 
 @app.route("/importar-instagram", methods=["POST"])
 def importar_instagram():
+    """Agenda download no Windows em vez de requisitar o Instagram no Railway."""
+    from instagram_import import normalizar_url_instagram, InstagramImportError
+
     dados = request.get_json(silent=True) or {}
-    url = (dados.get("url") or "").strip()
-    job_id = uuid.uuid4().hex
-    entrada = None
-
     try:
-        retorno = _worker_json(
-            INSTAGRAM_WORKER,
-            {
-                "url": url,
-                "pasta_destino": WORK_DIR,
-                "identificador": job_id,
-                "limite_mb": MAX_VIDEO_UPLOAD_MB,
-            },
-            timeout=300,
-        )
-        if not retorno.get("ok"):
-            return jsonify({"erro": str(retorno.get("erro") or "Falha ao importar o Reels.")}), 400
+        url = normalizar_url_instagram(str(dados.get("url") or ""))
+    except InstagramImportError as exc:
+        return jsonify({"erro": str(exc)}), 400
 
-        entrada = str(retorno.get("path") or "")
-        nome = str(retorno.get("nome") or "reel.mp4")
-        if not entrada or not os.path.isfile(entrada):
-            raise RuntimeError("O importador não retornou o vídeo baixado.")
+    if not IMPORTADOR_PC_TOKEN:
+        return jsonify({"erro": "Configure IMPORTADOR_PC_TOKEN nas Variables do Railway."}), 503
 
-        return jsonify(_analisar_arquivo(entrada, nome, job_id))
-    except Exception as e:
-        if entrada:
-            try:
-                os.remove(entrada)
-            except OSError:
-                pass
-        return jsonify({"erro": f"Falha ao importar o Reels: {e}"}), 500
+    with IMPORTADOR_PC_LOCK:
+        _pc_import_limpar_locked()
+        if not _pc_import_online_locked():
+            return jsonify({"erro": "Importador do PC offline. Abra INICIAR_IMPORTADOR_PC.bat no Windows e mantenha-o aberto."}), 503
+        ativos = sum(j.get("estado") in {"aguardando_pc", "processando", "analisando"} for j in IMPORTADOR_PC_JOBS.values())
+        if ativos >= 25:
+            return jsonify({"erro": "Fila do PC cheia. Aguarde os downloads anteriores."}), 429
+        job_id = uuid.uuid4().hex
+        IMPORTADOR_PC_JOBS[job_id] = {
+            "url": url, "estado": "aguardando_pc", "atualizado": time.time(),
+            "erro": None, "resultado": None,
+        }
+    print(f"[PC_IMPORT] tarefa criada id={job_id[:8]}", flush=True)
+    resposta = jsonify({"job_id": job_id, "estado": "aguardando_pc"})
+    resposta.status_code = 202
+    resposta.headers["Cache-Control"] = "no-store"
+    return resposta
+
+
+@app.route("/importar-instagram/status/<job_id>")
+def status_importar_instagram(job_id):
+    if len(job_id) != 32 or any(c not in "0123456789abcdef" for c in job_id):
+        return jsonify({"erro": "Identificador inválido."}), 404
+    with IMPORTADOR_PC_LOCK:
+        _pc_import_limpar_locked()
+        job = IMPORTADOR_PC_JOBS.get(job_id)
+        if job is None:
+            return jsonify({"erro": "Importação expirada. Tente novamente."}), 404
+        dados = {"estado": job["estado"]}
+        if job["estado"] == "concluido":
+            dados["resultado"] = job["resultado"]
+        elif job["estado"] == "erro":
+            dados["erro"] = job.get("erro") or "Erro no download do PC."
+    resp = jsonify(dados)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/agente/importador/heartbeat", methods=["POST"])
+def agente_importador_heartbeat():
+    if not _pc_import_autorizado():
+        return jsonify({"erro": "Token do importador inválido."}), 401
+    global IMPORTADOR_PC_ULTIMO_PING
+    with IMPORTADOR_PC_LOCK:
+        IMPORTADOR_PC_ULTIMO_PING = time.time()
+        _pc_import_limpar_locked()
+    return jsonify({"ok": True})
+
+
+@app.route("/agente/importador/tarefa")
+def agente_importador_tarefa():
+    if not _pc_import_autorizado():
+        return jsonify({"erro": "Token do importador inválido."}), 401
+    global IMPORTADOR_PC_ULTIMO_PING
+    with IMPORTADOR_PC_LOCK:
+        IMPORTADOR_PC_ULTIMO_PING = time.time()
+        _pc_import_limpar_locked()
+        for job_id, job in IMPORTADOR_PC_JOBS.items():
+            if job["estado"] == "aguardando_pc":
+                job["estado"] = "processando"
+                job["atualizado"] = time.time()
+                return jsonify({"job_id": job_id, "url": job["url"], "limite_mb": MAX_VIDEO_UPLOAD_MB})
+    return jsonify({"job_id": None})
+
+
+@app.route("/agente/importador/falha/<job_id>", methods=["POST"])
+def agente_importador_falha(job_id):
+    if not _pc_import_autorizado():
+        return jsonify({"erro": "Token do importador inválido."}), 401
+    with IMPORTADOR_PC_LOCK:
+        job = IMPORTADOR_PC_JOBS.get(job_id)
+        if not job or job["estado"] != "processando":
+            return jsonify({"erro": "Tarefa não disponível para falha."}), 409
+        # Não publique log bruto do yt-dlp: ele pode conter URLs de mídia assinadas.
+        mensagem = str((request.get_json(silent=True) or {}).get("erro") or "Não foi possível baixar o Reel no PC.")[:240]
+        job.update(estado="erro", erro=mensagem, atualizado=time.time())
+    print(f"[PC_IMPORT] falha id={job_id[:8]}", flush=True)
+    return jsonify({"ok": True})
+
+
+@app.route("/agente/importador/concluir/<job_id>", methods=["POST"])
+def agente_importador_concluir(job_id):
+    if not _pc_import_autorizado():
+        return jsonify({"erro": "Token do importador inválido."}), 401
+    if _corpo_maior_que(MAX_VIDEO_UPLOAD_BYTES):
+        return jsonify({"erro": f"Arquivo maior que {MAX_VIDEO_UPLOAD_MB} MB."}), 413
+    arquivo = request.files.get("video")
+    if not arquivo or not arquivo.filename:
+        return jsonify({"erro": "Vídeo não enviado."}), 400
+    if os.path.splitext(arquivo.filename)[1].lower() != ".mp4":
+        return jsonify({"erro": "Envie um arquivo MP4."}), 400
+
+    with IMPORTADOR_PC_LOCK:
+        job = IMPORTADOR_PC_JOBS.get(job_id)
+        if job is None or job.get("estado") != "processando":
+            return jsonify({"erro": "Tarefa não encontrada ou já finalizada."}), 409
+        job["estado"] = "analisando"
+        job["atualizado"] = time.time()
+
+    nome = secure_filename(arquivo.filename) or "reel_pc.mp4"
+    entrada = os.path.join(WORK_DIR, f"{job_id}_pc_{nome}")
+    try:
+        arquivo.save(entrada)
+        if os.path.getsize(entrada) > MAX_VIDEO_UPLOAD_BYTES:
+            raise ValueError(f"Vídeo maior que {MAX_VIDEO_UPLOAD_MB} MB.")
+        resultado = _analisar_arquivo(entrada, nome, job_id)
+        with IMPORTADOR_PC_LOCK:
+            job = IMPORTADOR_PC_JOBS.get(job_id)
+            if job is not None:
+                job.update(estado="concluido", resultado=resultado, atualizado=time.time())
+        print(f"[PC_IMPORT] sucesso id={job_id[:8]}", flush=True)
+        return jsonify({"ok": True})
+    except Exception as exc:
+        try:
+            os.remove(entrada)
+        except OSError:
+            pass
+        with IMPORTADOR_PC_LOCK:
+            job = IMPORTADOR_PC_JOBS.get(job_id)
+            if job is not None:
+                job.update(estado="erro", erro="Falha ao analisar o vídeo recebido do PC.", atualizado=time.time())
+        print(f"[PC_IMPORT] falha na analise id={job_id[:8]} tipo={type(exc).__name__}", file=sys.stderr, flush=True)
+        return jsonify({"erro": "Falha ao analisar vídeo recebido do PC."}), 500
     finally:
         _liberar_memoria()
 
