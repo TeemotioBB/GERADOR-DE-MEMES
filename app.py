@@ -1454,6 +1454,7 @@ def _executar_importacao_instagram(job_id, url):
             with IMPORTACOES_LOCK:
                 IMPORTACOES[job_id].update(estado="concluido", resultado=resultado)
     except Exception as exc:
+        app.logger.exception("IMPORTAR_INSTAGRAM tarefa %s falhou: %s", job_id[:8], exc)
         if entrada:
             try:
                 os.remove(entrada)
@@ -1465,24 +1466,38 @@ def _executar_importacao_instagram(job_id, url):
         _liberar_memoria()
 
 
+@app.route("/importar-instagram/health", methods=["GET"])
+def health_importacao_instagram():
+    return jsonify({"ok": True, "servico": "importar-instagram", "versao": "diagnostico-2"})
+
+
 @app.route("/importar-instagram", methods=["POST"])
 def importar_instagram():
+    app.logger.warning("IMPORTAR_INSTAGRAM POST recebido: origem=%s", request.headers.get("Origin", "mesma origem"))
     dados = request.get_json(silent=True) or {}
     url = str(dados.get("url") or "").strip()
     if not url or len(url) > 2048 or not __import__("re").match(
         r"^https?://(?:www\.)?instagram\.com/(?:reel|reels|p)/[A-Za-z0-9_-]+", url, __import__("re").I
     ):
         return jsonify({"erro": "Informe um link válido de Reels do Instagram."}), 400
+    chave_cliente = str(dados.get("request_id") or "")
+    if chave_cliente and (len(chave_cliente) > 100 or not all(c.isalnum() or c in "-_" for c in chave_cliente)):
+        return jsonify({"erro": "Identificador de requisição inválido."}), 400
     agora = time.time()
     with IMPORTACOES_LOCK:
         for chave, tarefa in list(IMPORTACOES.items()):
             if agora - tarefa["criado_em"] > IMPORTACOES_TTL and tarefa["estado"] in ("erro", "concluido"):
                 IMPORTACOES.pop(chave, None)
+        if chave_cliente:
+            for existente_id, tarefa in IMPORTACOES.items():
+                if tarefa.get("request_id") == chave_cliente:
+                    return jsonify({"job_id": existente_id, "estado": tarefa["estado"]}), 202
         ativas = sum(t["estado"] not in ("erro", "concluido") for t in IMPORTACOES.values())
         if ativas >= 4:
             return jsonify({"erro": "Há muitas importações em andamento. Tente novamente em instantes."}), 429
         job_id = uuid.uuid4().hex
-        IMPORTACOES[job_id] = {"estado": "aguardando", "criado_em": agora}
+        IMPORTACOES[job_id] = {"estado": "aguardando", "criado_em": agora, "request_id": chave_cliente}
+    app.logger.warning("IMPORTAR_INSTAGRAM tarefa criada: %s", job_id[:8])
     threading.Thread(target=_executar_importacao_instagram, args=(job_id, url), daemon=True,
                      name=f"importar-reel-{job_id[:8]}").start()
     return jsonify({"job_id": job_id, "estado": "aguardando"}), 202
