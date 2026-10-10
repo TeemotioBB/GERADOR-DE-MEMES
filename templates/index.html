@@ -1076,11 +1076,39 @@ https://www.instagram.com/reel/..."></textarea>
       render();
 
       try {
-        const inicio = await respostaJson('/importar-instagram', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({url: it.urlInstagram})
-        }, 20000);
+        // Chave estável evita iniciar duas tarefas se o primeiro POST chegou,
+        // mas a resposta se perdeu no caminho.
+        const requestId = (window.crypto && window.crypto.randomUUID)
+          ? window.crypto.randomUUID() : `${Date.now()}-${it.localId}`;
+        let inicio = null;
+        let ultimoErro = null;
+        for (let tentativa = 1; tentativa <= 3; tentativa++) {
+          try {
+            inicio = await respostaJson('/importar-instagram', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({url: it.urlInstagram, request_id: requestId})
+            }, 20000);
+            break;
+          } catch (erro) {
+            ultimoErro = erro;
+            if (!erroDeConexao(erro) || tentativa === 3) break;
+            statusImportar.textContent = `Conexão inicial instável. Nova tentativa ${tentativa + 1}/3...`;
+            await esperar(1000 * tentativa);
+          }
+        }
+        if (!inicio) {
+          if (erroDeConexao(ultimoErro)) {
+            try {
+              const saude = await respostaJson('/importar-instagram/health', {method:'GET'}, 8000);
+              if (saude.ok) throw new Error('O servidor está online, mas a chamada POST de importação falhou. Abra F12 > Rede e confira POST /importar-instagram (status, mensagem e bloqueios).');
+            } catch (diagnostico) {
+              if (!erroDeConexao(diagnostico)) throw diagnostico;
+              throw new Error('Sem conexão com a rota de importação. Confira em F12 > Rede se a requisição foi bloqueada e os logs HTTP do Railway.');
+            }
+          }
+          throw ultimoErro;
+        }
         if (!inicio.job_id) throw new Error('O servidor não criou a tarefa de importação.');
         const j = await aguardarImportacaoInstagram(inicio.job_id);
 
@@ -1101,7 +1129,7 @@ https://www.instagram.com/reel/..."></textarea>
         it.estado = 'erro_analise';
         it.msgErro = err.name === 'AbortError'
           ? 'A importação excedeu o tempo limite.'
-          : (erroDeConexao(err) ? 'Falha de conexão com o Railway. Consulte os logs do deploy.' : (err.message || 'Não foi possível importar este Reels.'));
+          : (err.message || 'Não foi possível importar este Reels.');
         render();
       }
     }
