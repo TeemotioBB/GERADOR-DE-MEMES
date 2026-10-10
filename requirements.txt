@@ -4,4 +4,4 @@ opencv-python-headless
 numpy
 gunicorn
 pilmoji
-yt-dlp
+yt-dlp[default,curl-cffi]
