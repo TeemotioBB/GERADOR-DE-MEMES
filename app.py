@@ -339,6 +339,12 @@ def _worker_json(worker_path, payload, timeout):
             text=True,
             timeout=timeout,
         )
+        # O worker roda em subprocesso; sem este trecho, seus diagnósticos
+        # seriam capturados e sumiriam dos logs do Railway.
+        if worker_path == INSTAGRAM_WORKER and proc.stderr:
+            for linha in proc.stderr.splitlines():
+                if linha.startswith("[INSTAGRAM_DIAG]"):
+                    print(linha, file=sys.stderr, flush=True)
         saida = (proc.stdout or "").strip()
         retorno = None
         if saida:
