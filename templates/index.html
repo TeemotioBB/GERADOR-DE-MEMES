@@ -1006,6 +1006,32 @@ https://www.instagram.com/reel/..."></textarea>
     return [...new Set(limpos)];
   }
 
+  async function aguardarImportacaoInstagram(jobId){
+    const inicio = Date.now();
+    let falhasConexao = 0;
+    while (Date.now() - inicio < 480000){
+      await esperar(2500);
+      try {
+        const status = await respostaJson(`/importar-instagram/status/${encodeURIComponent(jobId)}`,
+          {method:'GET', cache:'no-store'}, 15000);
+        falhasConexao = 0;
+        if (status.estado === 'concluido') return status.resultado;
+        if (status.estado === 'erro') throw new Error(status.erro || 'Falha na importação.');
+        statusImportar.textContent = status.estado === 'analisando'
+          ? 'Vídeo baixado. Analisando o Reels...'
+          : status.estado === 'baixando'
+            ? 'Baixando Reels no servidor...'
+            : 'Aguardando início da importação...';
+      } catch (err){
+        if (!erroDeConexao(err)) throw err;
+        falhasConexao++;
+        statusImportar.textContent = `Reconectando ao servidor (${falhasConexao})...`;
+        if (falhasConexao >= 8) throw new Error('Conexão com o Railway indisponível. Verifique os logs e tente novamente.');
+      }
+    }
+    throw new Error('A importação excedeu 8 minutos. Verifique os logs do Railway.');
+  }
+
   async function importarInstagram(){
     const links = extrairLinksInstagram(inputInstagram.value);
 
@@ -1050,11 +1076,13 @@ https://www.instagram.com/reel/..."></textarea>
       render();
 
       try {
-        const j = await respostaJson('/importar-instagram', {
+        const inicio = await respostaJson('/importar-instagram', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({url: it.urlInstagram})
-        }, 180000);
+        }, 20000);
+        if (!inicio.job_id) throw new Error('O servidor não criou a tarefa de importação.');
+        const j = await aguardarImportacaoInstagram(inicio.job_id);
 
         if (!itens.some(item => item.localId === it.localId)) continue;
         it.nome = j.nome || `reel_instagram_${i + 1}.mp4`;
@@ -1073,7 +1101,7 @@ https://www.instagram.com/reel/..."></textarea>
         it.estado = 'erro_analise';
         it.msgErro = err.name === 'AbortError'
           ? 'A importação excedeu o tempo limite.'
-          : (err.message || 'Não foi possível importar este Reels.');
+          : (erroDeConexao(err) ? 'Falha de conexão com o Railway. Consulte os logs do deploy.' : (err.message || 'Não foi possível importar este Reels.'));
         render();
       }
     }
