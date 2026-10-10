@@ -1,0 +1,6 @@
+A importação continua 100% no Railway, sem agente local.
+Ajustes: HTTP 401/403 acionam nova tentativa com os cookies configurados,
+e o yt-dlp pode testar conexão sem impersonação quando recebe 401/403.
+ATENÇÃO: falhas 401/403 podem ser recusa do Instagram ao IP do Railway,
+mesmo com cookies válidos. Não há garantia de sucesso.
+Não compartilhe INSTAGRAM_COOKIES_B64 ou cookies.txt.

@@ -119,6 +119,10 @@ def _erro_pede_autenticacao(mensagem: str) -> bool:
         "authentication",
         "main webpage is locked behind the login page",
         "requested content is not available",
+        "http error 401",
+        "401: unauthorized",
+        "http error 403",
+        "403: forbidden",
     )
     return any(sinal in texto for sinal in sinais)
 
@@ -202,9 +206,11 @@ def _executar_download(
     try:
         return _rodar(True)
     except Exception as exc:
-        # Se o impersonate não for suportado pelo ambiente (versão do
-        # curl-cffi incompatível, alvo indisponível), tenta sem ele.
-        if "impersonat" in str(exc).lower():
+        # Algumas versões do extractor e servidores respondem diferentemente
+        # com e sem impersonação TLS. Em 401/403, testar o transporte padrão
+        # uma vez antes de declarar a sessão recusada.
+        motivo = str(exc).lower()
+        if ("impersonat" in motivo or "401" in motivo or "403" in motivo):
             return _rodar(False)
         raise
 
@@ -265,8 +271,10 @@ def baixar_video_instagram(
                     ) from segundo_erro
                 if _erro_pede_autenticacao(mensagem2):
                     raise InstagramImportError(
-                        "Os cookies do Instagram expiraram ou foram recusados. "
-                        "Exporte um cookies.txt novo e atualize INSTAGRAM_COOKIES_B64 no Railway. "
+                        "O Instagram devolveu erro de autenticação (401/403) mesmo com cookies. "
+                        "Confira se INSTAGRAM_COOKIES_B64 contém uma sessão válida e se o Reels "
+                        "abre nessa conta. Se os cookies estiverem válidos, o Instagram pode estar "
+                        "recusando o IP do Railway; isso não pode ser resolvido apenas com CORS. "
                         f"Detalhe: {_detalhe(mensagem2)}"
                     ) from segundo_erro
                 raise InstagramImportError(
