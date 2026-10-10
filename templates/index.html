@@ -1006,22 +1006,6 @@ https://www.instagram.com/reel/..."></textarea>
     return [...new Set(limpos)];
   }
 
-  async function esperarImportacaoPc(jobId){
-    const inicio = Date.now();
-    while (Date.now() - inicio < 660000){
-      await esperar(1600);
-      const status = await respostaJson(
-        `/importar-instagram/status/${encodeURIComponent(jobId)}`,
-        {method: 'GET'}, 30000
-      );
-      if (status.estado === 'concluido') return status.resultado;
-      if (status.estado === 'erro') throw new Error(status.erro || 'Importador do PC falhou.');
-      if (status.estado === 'processando') statusImportar.textContent = 'Seu computador está baixando o Reels...';
-      if (status.estado === 'analisando') statusImportar.textContent = 'Vídeo recebido! Railway analisando...';
-    }
-    throw new Error('O download demorou demais. Verifique a janela do importador no PC.');
-  }
-
   async function importarInstagram(){
     const links = extrairLinksInstagram(inputInstagram.value);
 
@@ -1066,12 +1050,11 @@ https://www.instagram.com/reel/..."></textarea>
       render();
 
       try {
-        let j = await respostaJson('/importar-instagram', {
+        const j = await respostaJson('/importar-instagram', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({url: it.urlInstagram})
-        }, 30000);
-        if (j.job_id && j.estado) j = await esperarImportacaoPc(j.job_id);
+        }, 180000);
 
         if (!itens.some(item => item.localId === it.localId)) continue;
         it.nome = j.nome || `reel_instagram_${i + 1}.mp4`;
