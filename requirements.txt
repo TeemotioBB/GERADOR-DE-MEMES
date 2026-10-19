@@ -4,4 +4,4 @@ opencv-python-headless
 numpy
 gunicorn
 pilmoji
-yt-dlp[default,curl-cffi]
+yt-dlp[default,curl-cffi]==2026.10.10.233141.dev0
