@@ -109,10 +109,19 @@ def _criar_arquivo_cookies_temporario() -> str | None:
         arquivo.close()
 
 
+def _erro_resposta_instagram_invalida(mensagem: str) -> bool:
+    """Identifica falha de API/resposta vazia sem culpar um link válido."""
+    texto = mensagem.lower()
+    return any(sinal in texto for sinal in (
+        "failed to parse json",
+        "jsondecodeerror",
+        "empty media response",
+    ))
+
+
 def _erro_pede_autenticacao(mensagem: str) -> bool:
     texto = mensagem.lower()
     sinais = (
-        "empty media response",
         "login",
         "log in",
         "cookies",
@@ -123,6 +132,9 @@ def _erro_pede_autenticacao(mensagem: str) -> bool:
         "401: unauthorized",
         "http error 403",
         "403: forbidden",
+        "http error 429",
+        "too many requests",
+        "rate-limit reached",
     )
     return any(sinal in texto for sinal in sinais)
 
@@ -206,12 +218,19 @@ def _executar_download(
     try:
         return _rodar(True)
     except Exception as exc:
-        # Algumas versões do extractor e servidores respondem diferentemente
-        # com e sem impersonação TLS. Em 401/403, testar o transporte padrão
-        # uma vez antes de declarar a sessão recusada.
+        # Algumas respostas do Instagram falham apenas com determinada
+        # impressão digital TLS. Tenta o transporte padrão UMA vez também
+        # para respostas vazias/JSON inválido, sem trocar cookies ou URL.
         motivo = str(exc).lower()
-        if ("impersonat" in motivo or "401" in motivo or "403" in motivo):
-            return _rodar(False)
+        if ("impersonat" in motivo or "401" in motivo or "403" in motivo
+                or _erro_resposta_instagram_invalida(motivo)):
+            try:
+                return _rodar(False)
+            except Exception as erro_fallback:
+                # Preserva erro mais útil se o fallback também falhar.
+                if _erro_resposta_instagram_invalida(motivo) and not _erro_resposta_instagram_invalida(str(erro_fallback)):
+                    raise exc from erro_fallback
+                raise
         raise
 
 
@@ -256,6 +275,24 @@ def baixar_video_instagram(
             if "limite" in mensagem.lower() or "too large" in mensagem.lower():
                 raise InstagramImportError(
                     f"O vídeo ultrapassa o limite de {limite_mb} MB."
+                ) from erro
+            if _erro_resposta_instagram_invalida(mensagem):
+                if cookiefile:
+                    raise InstagramImportError(
+                        "O Instagram devolveu dados vazios ou inválidos para o importador. "
+                        "Isso pode ser uma mudança na API, bloqueio do IP do Railway "
+                        "ou cookies de sessão vencidos. Verifique/renove os cookies "
+                        "e tente novamente mais tarde. Se persistir, baixe o MP4 "
+                        "por um método autorizado e envie o arquivo diretamente. "
+                        f"Detalhe técnico: {_detalhe(mensagem)}"
+                    ) from erro
+                raise InstagramImportError(
+                    "O Instagram não retornou dados válidos para importar este Reels. "
+                    "Tente configurar INSTAGRAM_COOKIES_B64 com cookies válidos "
+                    "da sua conta no Railway. A falha também pode ser uma mudança "
+                    "na API ou bloqueio temporário do IP. Como alternativa, "
+                    "importe o arquivo MP4 diretamente. "
+                    f"Detalhe técnico: {_detalhe(mensagem)}"
                 ) from erro
             if _erro_pede_autenticacao(mensagem):
                 if cookiefile:
