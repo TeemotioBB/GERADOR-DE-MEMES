@@ -458,6 +458,7 @@ def _normalizar_uniqueness_railway(dados):
     defaults_uniqueness = {
         "edicoes_extras": False,
         "usar_logo": False,
+        "cortar_extremidades": False,
         "light_crop": True,
         "color_adjust": True,
         "subtle_grain": True,
@@ -1931,6 +1932,7 @@ def gerar():
     defaults_uniqueness = {
         "edicoes_extras": False,
         "usar_logo": False,
+        "cortar_extremidades": False,
         "light_crop": True,
         "color_adjust": True,
         "subtle_grain": True,
