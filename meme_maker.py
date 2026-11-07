@@ -332,6 +332,8 @@ def _normalizar_opcoes_uniqueness(options):
 
     # Chave da logomarca (OFF por padrão)
     usar_logo = bool(options.get("usar_logo", False))
+    # Recorte temporal opcional: 0,3s de cada extremidade (OFF por padrão).
+    cortar_extremidades = bool(options.get("cortar_extremidades", False))
 
     # Velocidade: só randomiza se edicoes_extras estiver ligada
     try:
@@ -352,6 +354,7 @@ def _normalizar_opcoes_uniqueness(options):
     return {
         "edicoes_extras": edicoes_extras,
         "usar_logo": usar_logo,
+        "cortar_extremidades": cortar_extremidades,
         # Sub-opções só fazem efeito se edicoes_extras=True
         "light_crop": bool(options.get("light_crop", True)),
         "color_adjust": bool(options.get("color_adjust", True)),
@@ -620,6 +623,20 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
     tem_audio = has_audio(video_path)
     opcoes = _normalizar_opcoes_uniqueness(uniqueness)
 
+    # Limita o INPUT original, antes dos filtros e antes de aplicar o template.
+    # Assim o início e o fim são removidos juntos do vídeo e do áudio, sem
+    # precisar de uma segunda codificação. A opção não afeta os demais inputs.
+    recorte_temporal_input = []
+    if opcoes["cortar_extremidades"]:
+        duracao_original = get_duration(video_path)
+        duracao_restante = duracao_original - 0.6
+        if duracao_restante <= 0:
+            raise ValueError(
+                "O vídeo precisa ter mais de 0,6 segundo para cortar "
+                "0,3s do início e 0,3s do fim."
+            )
+        recorte_temporal_input = ["-ss", "0.3", "-t", f"{duracao_restante:.6f}"]
+
     if crop is not None:
         cx0, cy0, cw0, ch0 = [int(round(v)) for v in crop]
         cx0 = max(0, min(cx0, vw - 2))
@@ -755,7 +772,7 @@ def _gerar(video_path, caption, output_path, crop=None, uniqueness=None):
         encoded_path = os.path.join(td, "post_encoded.mp4")
         overlay.save(overlay_path)
 
-        inputs = ["-i", video_path, "-framerate", "30", "-loop", "1", "-i", overlay_path]
+        inputs = [*recorte_temporal_input, "-i", video_path, "-framerate", "30", "-loop", "1", "-i", overlay_path]
         # índice 0 = vídeo, 1 = template overlay
 
         if usar_logo:
