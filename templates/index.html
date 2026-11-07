@@ -440,6 +440,10 @@
       <input type="checkbox" id="chkUsarLogo" style="width:18px;height:18px;accent-color:#3b82f6;">
       🏷️ Colocar logomarca do perfil
     </label>
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px;font-weight:650;margin-top:6px;">
+      <input type="checkbox" id="chkCortarExtremidades" style="width:18px;height:18px;accent-color:#3b82f6;">
+      ✂️ Cortar 0,3s do início e do fim do vídeo
+    </label>
   </div>
 
   <div class="card">
@@ -2007,6 +2011,8 @@ https://www.instagram.com/reel/..."></textarea>
       document.getElementById('chkEdicoesExtras').checked;
     const usarLogo =
       document.getElementById('chkUsarLogo').checked;
+    const cortarExtremidades =
+      document.getElementById('chkCortarExtremidades').checked;
 
     const payloads = fila.map(it => ({
       id: it.jobId,
@@ -2015,7 +2021,8 @@ https://www.instagram.com/reel/..."></textarea>
       perfil: perfilSel,
       uniqueness: {
         edicoes_extras: edicoesExtras,
-        usar_logo: usarLogo
+        usar_logo: usarLogo,
+        cortar_extremidades: cortarExtremidades
       }
     }));
 
